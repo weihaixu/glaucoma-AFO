@@ -1,0 +1,24 @@
+{
+  "title": "glaucoma-AFO: an R pipeline for multi-omics analysis of trabecular meshwork mechanotransduction and extracellular matrix remodelling in primary open-angle glaucoma",
+  "description": "<p>A numbered R pipeline (steps 00-17) for an integrative, dry-laboratory study of primary open-angle glaucoma. Starting from public bulk trabecular meshwork transcriptomes, single-cell atlases of the outflow pathway, eQTL/pQTL resources and GWAS summary statistics, the pipeline runs differential expression, WGCNA, pathway-activity and deconvolution modelling, machine-learning signature construction with Harrell optimism correction, single-cell and cell-cell communication analysis, cross-species concordance, colocalisation, TWAS, two-sample and mediation Mendelian randomisation, in silico gene perturbation with label-permutation and multiverse robustness checks, and finally writes a results ledger that maps every number reported in the manuscript back to the output file and field from which it was derived.</p><p>All steps are driven by a single YAML configuration file. A synthetic demo dataset (<code>99_demo_data.R</code>) reproduces the whole chain without downloading any real data. Raw data are not redistributed here; accessions and expected file locations are listed in the README.</p>",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Xu, Weihai",
+      "affiliation": "Department of Ophthalmology, Binhai County People's Hospital, Kangda College of Nanjing Medical University, Yancheng 224500, Jiangsu Province, China"
+    }
+  ],
+  "keywords": [
+    "primary open-angle glaucoma",
+    "trabecular meshwork",
+    "extracellular matrix",
+    "mechanotransduction",
+    "YAP/TAZ",
+    "Mendelian randomization",
+    "single-cell transcriptomics",
+    "reproducible research"
+  ],
+  "notes": "This work was supported by the Yancheng Municipal Health Commission (grant no. YK2023033)."
+}

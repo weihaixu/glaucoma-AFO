@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this pipeline, please cite it as below and cite the associated article."
+title: "glaucoma-AFO: an R pipeline for multi-omics analysis of trabecular meshwork mechanotransduction and extracellular matrix remodelling in primary open-angle glaucoma"
+type: software
+authors:
+  - family-names: Xu
+    given-names: Weihai
+    affiliation: "Department of Ophthalmology, Binhai County People's Hospital, Kangda College of Nanjing Medical University, Yancheng 224500, Jiangsu Province, China"
+version: 0.1.0
+date-released: 2026-11-10
+license: MIT
+abstract: >-
+  A numbered R pipeline (steps 00-17) covering bulk transcriptome preprocessing
+  and differential expression, WGCNA, pathway activity and deconvolution,
+  machine-learning signature construction with Harrell optimism correction,
+  single-cell and cell-cell communication analysis, cross-species concordance,
+  colocalisation, TWAS, two-sample and mediation Mendelian randomisation,
+  in silico perturbation with label-permutation and multiverse robustness checks,
+  and a results ledger that maps every reported number back to the output file
+  and field from which it was derived.
+keywords:
+  - primary open-angle glaucoma
+  - trabecular meshwork
+  - extracellular matrix
+  - mechanotransduction
+  - Mendelian randomization
+  - single-cell transcriptomics
+  - reproducibility

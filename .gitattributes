@@ -1,0 +1,11 @@
+# Normalise line endings so the repo behaves the same on Windows / macOS / Linux
+* text=auto eol=lf
+
+# Never normalise binary / data files
+*.rds binary
+*.RData binary
+*.png binary
+*.pdf binary
+*.xlsx binary
+*.gz binary
+*.zip binary

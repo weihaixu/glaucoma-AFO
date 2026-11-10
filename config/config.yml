@@ -1,0 +1,242 @@
+# =============================================================================
+# 青光眼房水外流阻力机制研究 —— 全流程参数配置
+# 所有脚本只读这一份配置，改参数不要改脚本。
+# 相对路径一律相对于项目根目录（含 config/ 的那一层）。
+# =============================================================================
+
+project:
+  name: "glaucoma_AFO"
+  seed: 20261101          # 全局随机种子，保证可复现
+  outdir: "results"       # 所有结果输出根目录
+  fig_width: 7
+  fig_height: 5
+  dpi: 300
+  log_dir: "logs"
+
+# -----------------------------------------------------------------------------
+# 课题一：bulk 转录组 + 单细胞
+# -----------------------------------------------------------------------------
+bulk:
+  # 训练集（必须有分组信息；GSE27276 为 17 POAG vs 19 对照的小梁网）
+  train:
+    gse: "GSE27276"
+    gpl: "GPL6883"         # 若不确定，留空则由脚本从 series matrix 自动读取
+    group_regex: "POAG|glaucoma"   # 命中该正则视为病例组，其余为对照
+    batch: null            # 若 pheno 中有批次列，填列名，如 "batch"
+  # 外部验证集（可多个；脚本用交集基因做 z-score 标准化后验证）
+  valid:
+    - gse: "GSE4316"
+      gpl: "GPL570"
+      group_regex: "glaucoma|POAG"
+    - gse: "GSE45570"
+      gpl: "GPL570"
+      group_regex: "glaucoma|POAG"
+
+  # 探针过滤与标准化
+  qc:
+    min_expr_quantile: 0.25   # 低于该分位数的探针视为不表达
+    log2_if_max_below: 50     # 最大值 < 该阈值则判定为未取 log，自动 log2
+    normalize_method: "quantile"
+    combat: true
+    auto_remove_outliers: false   # 默认只标记不删除，人工确认后改 true
+    outlier_sd: 3
+
+  # 差异表达
+  deg:
+    fdr: 0.05
+    logfc: 1.0
+    min_samples_expr: 0.5     # 至少一半样本有表达
+
+  # WGCNA
+  wgcna:
+    soft_power: null          # null = 自动挑选（R^2 首次 >= 0.8 且斜率转正）
+    min_module_size: 30
+    merge_cut_height: 0.25
+    deep_split: 2
+    network_type: "signed"
+    tom_type: "signed"
+    # 与模块关联的表型：必须是 pheno 里的数值列，缺失则自动跳过
+    traits_numeric: ["IOP", "MD", "CCT", "age"]
+    traits_binary: ["group"]
+
+  # 富集与通路
+  enrich:
+    p_cut: 0.05
+    q_cut: 0.2
+    msigdb_category: "H"      # H = Hallmark；C2 = KEGG/Reactome 合集
+    progeny_model: "Human"
+
+  # 反卷积：用单细胞参考构建 signature，NNLS 求细胞比例
+  deconv:
+    method: "nnls"            # nnls | xcell
+    signature_cells: ["TM", "JCT", "SC", "immune", "fibroblast", "endothelial"]
+    min_expr: 0.5
+    max_genes_per_celltype: 300
+
+  # 机器学习建模
+  ml:
+    lasso_lambda: "lambda.min"
+    lasso_folds: 10
+    svm_rfe_subsets: [2, 3, 4, 5, 6, 8, 10, 12, 15, 20]
+    rf_ntree: 1000
+    use_boruta: true
+    boot_n: 1000
+
+# -----------------------------------------------------------------------------
+# 课题一：单细胞（06）
+# -----------------------------------------------------------------------------
+scrna:
+  mode: "rds"                  # rds = 读现成 Seurat 对象；10x = 读 CellRanger 输出目录
+  rds: "data/processed/scRNA_ref.rds"
+  tenx_dirs: []                # mode=10x 时填目录列表
+  group_regex: "POAG|glaucoma|DEX|treated"
+  resolution: 0.6
+  qc:
+    min_features: 200
+    max_features: 8000
+    max_mt: 20
+  tm_celltypes: ["TM", "JCT"]  # 做差异与拟时序的小梁网区室标签
+
+# -----------------------------------------------------------------------------
+# 课题二：遗传学（GWAS × eQTL × pQTL → 共定位/TWAS/MR）
+# -----------------------------------------------------------------------------
+genetics:
+  # GWAS 汇总统计（FinnGen R12 POAG 示例；替换为你实际下载的文件）
+  gwas:
+    path: "data/raw/finngen_R12_H7_GLAUCOMA.gz"
+    sep: "\t"
+    cols:
+      snp: "rsids"
+      beta: "beta"
+      se: "sebeta"
+      pval: "pval"
+      ea: "alt"
+      nea: "ref"
+      eaf: "af_alt"
+      "n": "N"   # 键必须加引号：YAML 1.1 会把裸 n 解析成布尔 FALSE
+    info_min: 0.8
+    type: "cc"                 # cc = 病例对照（POAG）；quant = 数量性状（如 IOP）
+    case_prop: 0.3             # coloc 的 cc 模型需要病例比例，按数据源实际值改
+    n_default: 300000          # 数据无 N 列时的替代值（仅用于 coloc 先验计算）
+    maf_min: 0.01
+    n_min: 1000
+    build: "hg38"
+
+  # 参考面板（LDSC munge + coloc.susie + FOCUS 都要用）
+  ld:
+    panel_plink: "data/raw/1000G_EUR_Phase3_plink/1000G.EUR.QC"
+    ldsc_dir: "tools/ldsc"
+    python: "python"
+
+  # eQTL：优先 tabix 直读，支持 GTEx v8 / eQTL Catalogue
+  eqtl:
+    source: "gtex"                 # gtex | eqtl_catalogue | local_tsv
+    gtex_dir: "data/raw/GTEx_v8"
+    # 必须与 GTEx v8 文件名前缀一致（<tissue>.v8.EUR.allpairs.txt.gz），
+    # 不是"Artery"这种简写；眼组织 eQTL 需另用 EyeGEx 或自建，见操作手册 E2
+    tissues: ["Artery_Tibial", "Nerve_Tibial", "Muscle_Skeletal",
+              "Adipose_Subcutaneous", "Skin_Sun_Exposed_Lower_leg",
+              "Brain_Frontal_Cortex_BA9"]
+    n_eqtl: 300                # 该组织 eQTL 样本量，coloc 的先验要用；GTEx v8 各组织不同，按实际改
+    local_tsv: "data/raw/eqtl_allpairs.tsv.gz"
+    window_kb: 500
+
+  # pQTL（UKB-PPP / deCODE）
+  pqtl:
+    path: "data/raw/UKBPPP_pqtl_selected.tsv.gz"
+    window_kb: 500
+
+  # 共定位
+  coloc:
+    p1: 1e-4
+    p2: 1e-4
+    p12: 1e-5
+    pp4_threshold: 0.8
+    susie: true
+    niter: 5000
+
+  # TWAS
+  twas:
+    fusion_dir: "tools/FUSION"
+    weights_dir: "data/raw/FUSION_weights"
+    focus_min_pp: 0.5
+
+  # 孟德尔随机化
+  mr:
+    exposure: "data/raw/eqtl_instruments.tsv.gz"   # 暴露（eQTL/pQTL）工具变量表
+    p_threshold: 5e-8
+    clump_r2: 0.001
+    clump_kb: 10000
+    f_stat_min: 10
+    methods: ["mr_ivw", "mr_egger_regression", "mr_weighted_median", "mr_presso"]
+    nboot_presso: 1000
+    steiger: true
+
+# -----------------------------------------------------------------------------
+# 课题三（干实验版）：计算扰动 / 中介 MR / 稳健性
+# 仅用 `Rscript run_all.R --only 11,12,13` 触发，不在默认 run.steps 里
+# -----------------------------------------------------------------------------
+drylab:
+  # 11：单细胞上的"数字敲除"
+  perturbation:
+    celltypes: ["TM", "JCT"]        # 必须与 scrna 对象的 cell_type 标签一致
+    target_genes: ["LOX", "LOXL1", "YAP1", "WWTR1"]
+    hvg: 2000                       # 建网用基因数
+    max_cells: 20000                # 每类细胞参与建网的上限，控内存
+    topk: 20                        # 每个基因保留的最近邻数
+    alpha: 0.7                      # 传播阻尼
+    steps: 5                        # 传播步数
+    n_perm: 1000                    # 度数匹配置换次数
+
+  # 12：两阶段 MR / 中介分析（表达 → IOP → POAG）
+  mediation:
+    iop_gwas: "data/raw/iop_gwas.tsv.gz"   # UKB / FinnGen / 已发表 IOP GWAS
+    p_threshold: 5e-8
+    cols:
+      snp: "SNP"
+      beta: "BETA"
+      se: "SE"
+      pval: "P"
+      ea: "A1"
+      nea: "A2"
+      eaf: "FRQ"                    # 无频率列可删掉这一行，脚本会置 NA
+
+  # 14：跨物种保守性（人 / 猴 / 鼠）
+  cross_species:
+    objects: {}                    # 例：{macaque: "data/processed/scRNA_macaque.rds",
+                                   #      mouse: "data/processed/scRNA_mouse.rds"}
+    celltypes: {}                  # 例：{macaque: ["TM","JCT"], mouse: ["TM"]}
+    celltypes_default: ["TM", "JCT"]
+    condition_col: "condition"     # 分组列；不存在时按 group_regex 在前几列 meta 中推断
+    group_regex: "POAG|glaucoma|DEX|treated|chronic|disease"
+    include_self: false            # true 时把人的 scrna.rds 也当一组跑（阳性对照）
+    ortholog_table: null           # 两列 tsv：human_symbol / <species>_symbol；不给则 toupper 近似
+    min_cells: 20                  # 每个 细胞类型×分组 的最少细胞数
+
+  # 13：稳健性、证伪与药物连通性
+  robustness:
+    n_perm: 1000
+    top_n: 10                       # 评分用 top-N 基因
+    lincs_path: null                # 有 LINCS/CMap 签名时填路径，否则跳过
+
+# -----------------------------------------------------------------------------
+# 成稿阶段（15/16/17）
+# -----------------------------------------------------------------------------
+manuscript:
+  template: "../output/manuscript/formatted-manuscript.html"   # 稿件模板（含 {{TOKEN}}）
+  filled:   "../output/manuscript/manuscript_filled.html"      # 回填后的版本
+  # html-to-doc 的转换脚本；一般指向 workbuddy-docx 插件内的 convert_doc.py
+  # 留空则 17 只回填 HTML，不转 docx
+  converter: ""
+  title: "Trabecular meshwork mechanotransduction and extracellular matrix remodelling in primary open-angle glaucoma"
+
+# -----------------------------------------------------------------------------
+# 运行开关（run_all.R 读取）
+# -----------------------------------------------------------------------------
+run:
+  # 01–14 是分析，15–17 是成稿（结果账本 → 图表素材 → token 回填）。
+  # 少了 15–17，run_all 跑到 10 就停，永远拿不到投稿稿。
+  steps: ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10",
+          "11", "12", "13", "14", "15", "16", "17"]
+  demo: false              # true 时读取 99_demo_data.R 生成的合成数据
+  overwrite: false
