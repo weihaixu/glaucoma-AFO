@@ -98,19 +98,20 @@ add("外部工具", "tools/ldsc", dir.exists(ldsc_dir),
     if (dir.exists(ldsc_dir)) "存在（注意：官方 ldsc 只支持 Python 2.7）" else "未下载")
 
 # ------------------------------------------------------------ 5) 配置文件 ------
-cfg <- NULL
-if (requireNamespace("yaml", quietly = TRUE)) {
-  cfg <- tryCatch(yaml::read_yaml(file.path(root, "config", "config.yml")),
-                  error = function(e) NULL)
-  add("配置", "config/config.yml 可解析", !is.null(cfg), "")
-  if (!is.null(cfg)) {
-    add("配置", "run.demo = false（真实数据模式）",
-        !isTRUE(cfg$run$demo),
-        if (isTRUE(cfg$run$demo)) "当前是 demo 模式，跑真实数据前改成 false")
-    add("配置", "project.outdir", TRUE, as.character(cfg$project$outdir))
-  }
-} else {
-  add("配置", "yaml 包", FALSE, "无法解析配置，先 install.packages('yaml')")
+# 注意：这里必须用 helpers 的 read_config，不能用裸的 yaml::read_yaml——
+# 在 GBK locale（中文 Windows 默认）下 libyaml 读到中文注释会【静默】返回
+# 空文档不报错；read_config 的第二层会把注释剥掉再解析。之前这里误报
+# "config.yml 不可解析"就是这个原因。
+cfg <- tryCatch({
+  source(file.path(root, "R", "helpers.R"))
+  read_config(file.path(root, "config", "config.yml"))
+}, error = function(e) NULL)
+add("配置", "config/config.yml 可解析", !is.null(cfg), "")
+if (!is.null(cfg)) {
+  add("配置", "run.demo = false（真实数据模式）",
+      !isTRUE(cfg$run$demo),
+      if (isTRUE(cfg$run$demo)) "当前是 demo 模式，跑真实数据前改成 false" else "")
+  add("配置", "project.outdir", TRUE, as.character(cfg$project$outdir))
 }
 
 # ------------------------------------------------------------ 6) 数据文件 ------

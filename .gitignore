@@ -21,6 +21,13 @@ tools/pick_mirror_install.R
 tools/install_stage.R
 tools/_cfgtest.R
 
+# ---- vendored third-party sources (re-cloned during environment setup, not redistributed) ----
+tools/ldsc/
+tools/*_src/
+tools/plink-ng/
+tools/CellChat_src/
+tools/monocle3_src/
+
 # ---- R / OS cruft ----
 .Rproj.user/
 .Rhistory
