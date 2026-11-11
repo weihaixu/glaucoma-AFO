@@ -122,8 +122,16 @@ genetics:
       "n": "N"   # 键必须加引号：YAML 1.1 会把裸 n 解析成布尔 FALSE
     info_min: 0.8
     type: "cc"                 # cc = 病例对照（POAG）；quant = 数量性状（如 IOP）
-    case_prop: 0.3             # coloc 的 cc 模型需要病例比例，按数据源实际值改
-    n_default: 300000          # 数据无 N 列时的替代值（仅用于 coloc 先验计算）
+    # FinnGen 的 sumstats 不带 N 列，样本量只能从表型元数据取（R12 H7_GLAUCOMA）：
+    # num_cases = 26591，num_controls = 473757 → N = 500348，病例比例 0.05314。
+    # 实测来源：https://r12.finngen.fi/api/pheno/H7_GLAUCOMA
+    # （原始 JSON 已存 data/raw/finngen_meta/H7_GLAUCOMA.pheno.json）
+    # 别随手写 0.3：coloc 的 cc 模型与 LDSC 的 h2 都会跟着偏。
+    case_prop: 0.0531
+    n_cases: 26591
+    n_controls: 473757
+    n_default: 500348          # 数据无 N 列时的替代值（仅用于 coloc 先验计算）
+    window_kb: 1000            # gwas_clean.rds 保留显著位点 ±window_kb 的窗口
     maf_min: 0.01
     n_min: 1000
     build: "hg38"
@@ -136,7 +144,11 @@ genetics:
 
   # eQTL：优先 tabix 直读，支持 GTEx v8 / eQTL Catalogue
   eqtl:
-    source: "gtex"                 # gtex | eqtl_catalogue | local_tsv
+    # gtex_remote = 不下载 3.5GB/组织的整包，按区间远程取（tools/fetch_eqtl_tabix.py）
+    # 镜像：EBI eQTL Catalogue 的 imported/GTEx_V8/ge/，比 GTEx 官网可达性好
+    source: "gtex_remote"          # gtex | gtex_remote | eqtl_catalogue | local_tsv
+    gtex_tabix_base: "https://ftp.ebi.ac.uk/pub/databases/spot/eQTL/imported/GTEx_V8/ge"
+    cache_dir: "data/raw/eqtl_cache"
     gtex_dir: "data/raw/GTEx_v8"
     # 必须与 GTEx v8 文件名前缀一致（<tissue>.v8.EUR.allpairs.txt.gz），
     # 不是"Artery"这种简写；眼组织 eQTL 需另用 EyeGEx 或自建，见操作手册 E2
@@ -154,6 +166,7 @@ genetics:
 
   # 共定位
   coloc:
+    max_loci: 12                 # 只做信号最强的若干位点：每位点×每组织一次远程取数
     p1: 1e-4
     p2: 1e-4
     p12: 1e-5

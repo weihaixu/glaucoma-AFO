@@ -282,6 +282,94 @@ download_if_missing <- function(url, dest) {
        "curl 命令（Windows 10 以上自带）或检查代理设置。", call. = FALSE)
 }
 
+# =============================================================================
+# 大表流式读取
+#
+# GWAS 汇总统计动辄两千万行，整表 fread + as.data.frame 会直接撞内存上限
+# （本机实测：FinnGen R12 21.3M 行，完整读入 4.9GB 可用内存下必崩）。
+# 这里一次只把 chunk 行读进内存：FUN 收到当前批次，返回什么就攒什么。
+#
+# 关键约定：FUN 必须只返回小对象（计数、显著位点、抽样点……）。
+# 如果 FUN 把整批行 append 回列表，就等于整表读入，白折腾。
+# =============================================================================
+peek_header <- function(path, n = 1) {
+  con <- if (grepl("\\.gz$", path, ignore.case = TRUE)) gzfile(path, "rt") else file(path, "rt")
+  on.exit(close(con), add = TRUE)
+  h <- readLines(con, n = n, warn = FALSE)[1]
+  h <- strsplit(h, "\t", fixed = TRUE)[[1]]
+  h[1] <- sub("^#", "", h[1])
+  trimws(h)
+}
+
+# cols  : 要读的源列名（按表头取位置）
+# types : 与 cols 等长的类型向量，"numeric" / "character"
+# 注意：fread 的 colClasses 是按整表列数给的，只读部分列时对不上；
+#       这里先让 fread 自己猜类型，再按 types 强制转一次。字符列猜成别的无妨，
+#       但如果某批全是 "NA"，数值列会被猜成 logical —— 强制转换正好兜住。
+stream_table <- function(path, cols, FUN, types = NULL, chunk = 5e5, verbose = TRUE,
+                         rename = NULL) {
+  con <- if (grepl("\\.gz$", path, ignore.case = TRUE)) gzfile(path, "rt") else file(path, "rt")
+  on.exit(close(con), add = TRUE)
+
+  hdr <- strsplit(readLines(con, n = 1, warn = FALSE), "\t", fixed = TRUE)[[1]]
+  hdr[1] <- sub("^#", "", hdr[1])
+  hdr <- trimws(hdr)
+  idx <- match(cols, hdr)
+  if (anyNA(idx)) {
+    stop("表头缺少列：", paste(cols[is.na(idx)], collapse = ", "),
+         "\n  可用列：", paste(hdr, collapse = ", "), call. = FALSE)
+  }
+  if (is.null(types)) types <- rep("character", length(cols))
+  out_names <- rename %||% cols
+  if (length(out_names) != length(cols)) stop("rename 长度必须与 cols 一致", call. = FALSE)
+
+  out <- list(); k <- 0L; nread <- 0L; t0 <- Sys.time()
+  repeat {
+    lines <- readLines(con, n = chunk, warn = FALSE)
+    if (!length(lines)) break
+    dt <- data.table::fread(text = lines, sep = "\t", header = FALSE,
+                            select = idx, showProgress = FALSE,
+                            na.strings = c("NA", "", ".", "nan"))
+    data.table::setnames(dt, out_names)
+    for (j in seq_along(cols)) {
+      v <- if (identical(types[j], "numeric")) suppressWarnings(as.numeric(dt[[j]])) else as.character(dt[[j]])
+      data.table::set(dt, j = j, value = v)
+    }
+    nread <- nread + nrow(dt)
+    k <- k + 1L
+    out[[k]] <- FUN(dt)
+    if (verbose && (k %% 20L == 0L)) {
+      el <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+      log_msg(sprintf("  已读 %s 行（%.0f 行/秒）", format(nread, big.mark = ","),
+                      nread / max(el, 1)))
+    }
+  }
+  if (verbose) {
+    log_msg("  流式读入完成：", format(nread, big.mark = ","), " 行 / ", k, " 批，用时 ",
+            round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1), " 分钟")
+  }
+  attr(out, "n_rows") <- nread
+  out
+}
+
+# 按 rsID 从全量 GWAS 文件里取子集。
+# gwas_clean.rds 只是"显著位点窗口 + P<1e-4"的分析子集，工具变量未必落在里面；
+# 10_mr / 12_mediation_mr 拿工具变量去结局里配对时必须走这里，
+# 否则会静默丢掉一部分 SNP（harmonise 后行数变少，但不会报错）。
+subset_by_snp <- function(path, snps, cols, types = NULL, chunk = 1e6) {
+  snps <- unique(as.character(snps))
+  res <- stream_table(path, cols = cols, types = types, chunk = chunk, verbose = FALSE,
+                      FUN = function(dt) dt[dt[[1]] %in% snps])
+  res <- res[!vapply(res, is.null, logical(1))]
+  if (!length(res)) {
+    out <- data.table::data.table()
+    for (i in seq_along(cols)) out[[cols[i]]] <- vector(mode = "logical", length = 0)
+    return(out)
+  }
+  out <- data.table::rbindlist(res)
+  unique(out, by = cols[1])
+}
+
 # 手动解析 series matrix（比 GEOquery 更稳，且不依赖 Bioconductor 版本）
 # 返回 list(expr = matrix, pheno = data.frame)
 read_series_matrix <- function(path) {

@@ -77,6 +77,23 @@ poag_df <- data.frame(SNP = outcome_all$SNP, beta = outcome_all$beta, se = outco
                       p = outcome_all$p, ea = outcome_all$A1, nea = outcome_all$A2,
                       eaf = outcome_all$EAF, stringsAsFactors = FALSE)
 
+# gwas_clean 是分析子集（显著位点窗口 + P<1e-4），IOP 工具变量未必在里面；
+# 缺的从全量 sumstats 回捞，否则第二步（IOP→POAG）的 harmonise 会静默少 SNP。
+miss <- setdiff(iop_df$SNP, poag_df$SNP)
+if (length(miss)) {
+  log_msg("检索 IOP 工具变量的 POAG 结局：分析子集缺 ", length(miss), " 个，回捞中")
+  extra <- subset_by_snp(proj_path("data", "processed", "gwas_ldsc.sumstats.gz"), miss,
+                         cols = c("SNP", "A1", "A2", "BETA", "SE", "P"),
+                         types = c("character", "character", "character",
+                                   "numeric", "numeric", "numeric"))
+  if (nrow(extra)) {
+    poag_df <- rbind(poag_df, data.frame(SNP = extra$SNP, beta = extra$BETA, se = extra$SE,
+                                         p = extra$P, ea = extra$A1, nea = extra$A2,
+                                         eaf = NA_real_, stringsAsFactors = FALSE))
+    log_msg("  回捞到 ", nrow(extra), " 个")
+  }
+}
+
 harm <- function(exp_df, out_df, label = "") {
   mk <- function(df, type) {
     a <- list(df, type = type, snp_col = "SNP", beta_col = "beta", se_col = "se",

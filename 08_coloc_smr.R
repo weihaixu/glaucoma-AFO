@@ -47,6 +47,13 @@ if (is.null(loci)) {
   loci <- lapply(picked, function(x) list(chr = x$chr, start = x$pos - win, end = x$pos + win, lead = x$snp))
   log_msg("自动识别 ", length(loci), " 个独立位点")
 }
+# 每个位点 × 每个组织要发一次远程区间请求，85 个位点 × 6 个组织 ≈ 500 次，
+# 一次 2–3MB，跑一晚上也跑不完。默认只做信号最强的若干个（按 lead P 排序）。
+max_loci <- cfg_get(cfg, "genetics.coloc.max_loci", 20) %||% 20
+if (length(loci) > max_loci) {
+  log_msg("位点 ", length(loci), " 个，按 coloc.max_loci 只做前 ", max_loci, " 个")
+  loci <- loci[seq_len(max_loci)]
+}
 log_msg("待分析位点：", length(loci), " 个")
 
 # ------------------------------------------------- 2) eQTL 区间读取 ---------
@@ -78,6 +85,46 @@ read_eqtl_region <- function(chr, start, end, tissue, cfg) {
       beta = df$slope, se = df$slope_se, p = df$pval_nominal,
       maf = df$maf, tissue = tissue, stringsAsFactors = FALSE
     )
+    return(out)
+  }
+
+  if (identical(st, "gtex_remote")) {
+    # GTEx v8 allpairs 的公开镜像在 EBI eQTL Catalogue 的 imported/GTEx_V8/ge/，
+    # 每个组织 3.5GB，整包下不动；本机 Rsamtools 的 Windows 构建不支持 http 远端
+    # tabix，pysam 也装不上（PyPI 被代理拦），于是用 tools/fetch_eqtl_tabix.py
+    # 自己解析 .tbi + HTTP Range 取块：一个 1Mb 窗口通常只传 1–3MB。
+    base <- cfg_get(cfg, "genetics.eqtl.gtex_tabix_base",
+                     "https://ftp.ebi.ac.uk/pub/databases/spot/eQTL/imported/GTEx_V8/ge")
+    cache <- proj_path(cfg_get(cfg, "genetics.eqtl.cache_dir", "data/raw/eqtl_cache"))
+    dir.create(cache, recursive = TRUE, showWarnings = FALSE)
+    key <- sprintf("%s_%s_%d_%d.tsv", tissue, chr, as.integer(start), as.integer(end))
+    out_f <- file.path(cache, key)
+    if (!file.exists(out_f) || file.size(out_f) < 2) {
+      url <- paste0(base, "/", tissue, ".tsv.gz")
+      py <- Sys.which("python")
+      if (!nzchar(py)) { log_msg("找不到 python，无法远程取 eQTL"); return(NULL) }
+      log_msg("  远程取 eQTL：", tissue, " ", chr, ":", round(start / 1e6, 2), "-", round(end / 1e6, 2), " Mb")
+      rc <- system2(py, c(proj_path("tools", "fetch_eqtl_tabix.py"),
+                          "--url", url, "--index", paste0(url, ".tbi"),
+                          "--chrom", as.character(chr),
+                          "--start", as.character(as.integer(start)),
+                          "--end", as.character(as.integer(end)),
+                          "--out", out_f),
+                    stdout = FALSE, stderr = FALSE)
+      if (rc != 0 || !file.exists(out_f)) { log_msg("  取数失败：", tissue, " ", chr); return(NULL) }
+    }
+    df <- tryCatch(data.table::fread(out_f, showProgress = FALSE), error = function(e) NULL)
+    if (is.null(df) || !nrow(df) || !"beta" %in% names(df)) return(NULL)
+    out <- data.frame(
+      SNP = as.character(df$rsid),
+      pos_key = paste0(df$chromosome, "_", df$position),
+      gene = sub("\\..*$", "", as.character(df$gene_id)),
+      A1 = toupper(as.character(df$alt)), A2 = toupper(as.character(df$ref)),
+      beta = as.numeric(df$beta), se = as.numeric(df$se),
+      p = as.numeric(df$pvalue), maf = as.numeric(df$maf),
+      tissue = tissue, stringsAsFactors = FALSE)
+    # GTEx 每个变异给了等位基因数 an，样本量 = an/2；比在 config 里写死一个数可靠
+    if ("an" %in% names(df)) attr(out, "n") <- stats::median(df$an, na.rm = TRUE) / 2
     return(out)
   }
 
@@ -164,7 +211,15 @@ for (li in seq_along(loci)) {
   for (ts in tissues) {
     q <- read_eqtl_region(lo$chr, lo$start, lo$end, ts, cfg)
     if (is.null(q) || !nrow(q)) next
-    for (gn in unique(q$gene)) {
+    # 该组织里连名义信号都没有的基因不做 coloc：没有 eQTL 就不可能有共定位，
+    # 逐个跑只是把 200 个基因 × 6 个组织白算一遍（coloc.abf 本身很便宜，
+    # 贵的是每个基因一次 merge）。
+    gene_minp <- tapply(q$p, q$gene, min, na.rm = TRUE)
+    gset <- names(gene_minp)[is.finite(gene_minp) & gene_minp < 1e-5]
+    if (!length(gset)) { log_msg("  ", ts, " @ 位点", li, "：窗口内无 P<1e-5 的 eQTL，跳过"); next }
+    log_msg("  位点", li, " / ", ts, "：", length(unique(q$gene)), " 个基因中 ",
+            length(gset), " 个有 eQTL 信号（P<1e-5），进入 coloc")
+    for (gn in gset) {
       qq <- q[q$gene == gn, ]
       h <- harmonize(gsub_df, qq)
       if (is.null(h) || nrow(h) < 20) {
@@ -191,8 +246,10 @@ for (li in seq_along(loci)) {
           next
         }
       }
+      n_eqtl <- attr(q, "n")
+      if (is.null(n_eqtl) || !is.finite(n_eqtl)) n_eqtl <- ecfg$n_eqtl %||% 300
       d2 <- list(snp = h$key, beta = h$beta.q, varbeta = h$se.q^2,
-                 type = "quant", N = ecfg$n_eqtl %||% 300, MAF = h$maf)
+                 type = "quant", N = n_eqtl, MAF = h$maf)
       if (any(is.na(d1$varbeta)) || any(is.na(d2$varbeta))) next
 
       if (nzchar(Sys.getenv("COLOC_DEBUG"))) {
@@ -258,22 +315,28 @@ for (li in seq_along(loci)) {
         save_fig(g1, paste0("coloc_locus_", gn, "_", ts), cfg, 4.6, 4.4)
       }
 
-      # ---- SMR / HEIDI 近似 -------------------------------------------------
-      bxy <- h$beta.g / h$beta.q
-      vxy <- h$se.g^2 / h$beta.q^2 + (h$beta.g^2 * h$se.q^2) / h$beta.q^4
-      ok <- is.finite(bxy) & is.finite(vxy) & vxy > 0
-      if (sum(ok) >= 3) {
-        w <- 1 / vxy[ok]
-        b_smr <- sum(bxy[ok] * w) / sum(w)
-        se_smr <- sqrt(1 / sum(w))
-        Q <- sum(w * (bxy[ok] - b_smr)^2)
-        p_heidi <- stats::pchisq(Q, df = sum(ok) - 1, lower.tail = FALSE)
+      # ---- SMR（单工具变量）------------------------------------------------
+      # 官方 SMR 以该基因最强的 eQTL SNP 作工具：b_SMR = b_GWAS / b_eQTL，
+      # se 用 delta 法。HEIDI 要靠 LD 矩阵比较多个 SNP 的异质性，没有 1000G
+      # 参考面板做不了，这里直接留 NA 并标注——不能用"区域内所有 SNP 逆方差
+      # 加权"冒充 HEIDI：这些 SNP 高度连锁，那样算出来的 p 会成片过度显著。
+      i_top <- which.min(h$p.q)
+      if (length(i_top) == 1 && is.finite(h$p.q[i_top]) &&
+          h$p.q[i_top] < 5e-8 && abs(h$beta.q[i_top]) > 1e-8) {
+        bq <- h$beta.q[i_top]; bg <- h$beta.g[i_top]
+        b_smr <- bg / bq
+        se_smr <- sqrt(h$se.g[i_top]^2 / bq^2 + bg^2 * h$se.q[i_top]^2 / bq^4)
         smr_all[[length(smr_all) + 1]] <- data.frame(
-          gene = gn, tissue = ts, n_snp = sum(ok),
+          gene = gn, tissue = ts, n_snp_region = nrow(h),
+          top_snp = as.character(h$key[i_top]),
+          p_eqtl = h$p.q[i_top],
+          F_eqtl = (bq / h$se.q[i_top])^2,
           b_SMR = b_smr, se_SMR = se_smr,
           p_SMR = 2 * stats::pnorm(-abs(b_smr / se_smr)),
-          Q_HEIDI = Q, df = sum(ok) - 1, p_HEIDI = p_heidi,
-          heidi_pass = p_heidi > 0.05, stringsAsFactors = FALSE)
+          Q_HEIDI = NA_real_, df = NA_real_, p_HEIDI = NA_real_,
+          heidi_pass = NA,
+          note = "HEIDI 需 1000G LD 面板，未计算",
+          stringsAsFactors = FALSE)
       }
     }
   }
@@ -281,8 +344,21 @@ for (li in seq_along(loci)) {
 }
 
 # ------------------------------------------------- 5) 汇总 ------------------
+# ENSG 写进表里没人看得懂；有 org.Hs.eg.db 就补一列 SYMBOL（不装也能跑）
+add_symbol <- function(df) {
+  if (is.null(df) || !nrow(df) || !"gene" %in% names(df)) return(df)
+  if (!requireNamespace("org.Hs.eg.db", quietly = TRUE) ||
+      !requireNamespace("AnnotationDbi", quietly = TRUE)) return(df)
+  sym <- suppressMessages(AnnotationDbi::mapIds(
+    org.Hs.eg.db::org.Hs.eg.db, keys = unique(df$gene), column = "SYMBOL",
+    keytype = "ENSEMBL", multiVals = "first"))
+  df$symbol <- unname(sym[df$gene])
+  df[, c("symbol", setdiff(names(df), "symbol")), drop = FALSE]
+}
+
 if (length(res_all)) {
   coloc_df <- do.call(rbind, res_all)
+  coloc_df <- add_symbol(coloc_df)
   coloc_df <- coloc_df[order(-coloc_df$PP.H4), ]
   write_tsv(coloc_df, "coloc_summary", cfg)
   strong <- coloc_df[coloc_df$PP.H4 > (ccfg$pp4_threshold %||% 0.8), ]
@@ -294,20 +370,23 @@ if (length(res_all)) {
 
 if (length(sens_all)) write_tsv(do.call(rbind, sens_all), "coloc_sensitivity", cfg)
 if (length(smr_all)) {
-  smr_df <- do.call(rbind, smr_all)
+  smr_df <- add_symbol(do.call(rbind, smr_all))
   smr_df <- smr_df[order(smr_df$p_SMR), ]
+  smr_df$fdr_SMR <- stats::p.adjust(smr_df$p_SMR, "BH")
   write_tsv(smr_df, "smr_heidi", cfg)
-  log_msg("SMR 显著且 HEIDI 通过：", sum(smr_df$p_SMR < 0.05 & smr_df$heidi_pass))
+  log_msg("单工具变量 SMR：", nrow(smr_df), " 个 gene-tissue 对，FDR<0.05 的 ",
+          sum(smr_df$fdr_SMR < 0.05), " 个（HEIDI 未做，需 LD 面板）")
+
 }
 
 # ------------------------------------------------- 6) 外部 SMR 二进制 -------
 # 官方 SMR/HEIDI 实现需要 BESD 格式，脚本不重复造轮子：
 #   1) 用 --eqtl-flist 生成 .besd
 #   2) smr --bfile <ref> --gwas-summary <file> --beqtl-summary <besd> --out <prefix> --peqtl-smr 5e-8
-# 若本机有 SMR 可执行文件，取消下面注释直接跑（结果与上面的近似值应高度一致）
+# 若本机有 SMR 可执行文件与 1000G 面板，跑完可核对该单工具变量估计
 smr_bin <- proj_path("tools", "smr")
 if (file.exists(smr_bin) && length(loci)) {
-  log_msg("检测到 SMR 二进制，可按 README 中的命令行参数调用；本脚本默认只用 R 近似值")
+  log_msg("检测到 SMR 二进制，可按 README 中的命令行参数调用；本脚本只给单工具变量估计")
 }
 
 log_msg("08 完成")

@@ -295,12 +295,13 @@ if (is.null(lam)) {
   }
 }
 if (!is.null(lam)) TK("GWAS_LAMBDA", fmt(as.numeric(lam[[1]])[1], 3), as.numeric(lam[[1]])[1],
-                      src_of(lam), "", "基因组控制系数 λ")
+                      "gwas_qc_meta.rds", "", "基因组控制系数 λ（QC 后，MAF>=1%）")
 
 col <- tbl("coloc_summary")
 if (!is.null(col)) {
   pp4 <- as.numeric(pick(col, c("PP.H4", "PP4"))); pp3 <- as.numeric(pick(col, c("PP.H3", "PP3")))
-  gn <- pick(col, c("gene")); ts <- pick(col, c("tissue")); snp <- pick(col, c("top_snp", "lead_snp"))
+  gn <- pick(col, c("symbol", "gene"))   # 有符号用符号，没有才退回 ENSG
+  ts <- pick(col, c("tissue")); snp <- pick(col, c("top_snp", "lead_snp"))
   thr <- cfg_get(cfg, "genetics.coloc.pp4_threshold", 0.8)
   n_strong <- sum(pp4 > thr, na.rm = TRUE)
   TK("N_COLOC_PAIRS", nrow(col), nrow(col), src_of(col), "", "检验的 gene×tissue 对数")
@@ -317,8 +318,12 @@ if (!is.null(col)) {
   # 列出所有通过阈值的基因，供讨论点名
   if (n_strong > 0) {
     strong <- col[which(pp4 > thr), ]
-    TK("COLOC_STRONG_LIST", paste(unique(strong$gene), collapse = "、"),
-       paste(unique(strong$gene), collapse = ","), src_of(col), "", "通过阈值的基因清单")
+    sgn <- if (!is.null(gn)) gn[which(pp4 > thr)] else strong$gene
+    # 有 15/150 个 ENSG 在 org.Hs.eg.db 里没有 SYMBOL，别把 NA 写进正文
+    bad <- is.na(sgn) | !nzchar(sgn)
+    if (any(bad)) sgn[bad] <- strong$gene[bad]
+    TK("COLOC_STRONG_LIST", paste(unique(sgn), collapse = "、"),
+       paste(unique(sgn), collapse = ","), src_of(col), "", "通过阈值的基因清单")
   }
 }
 

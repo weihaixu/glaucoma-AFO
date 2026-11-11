@@ -82,6 +82,26 @@ log_msg("保留工具变量 ", nrow(inst), " 个（", length(unique(inst$gene)),
         round(stats::median(inst$F_stat), 1))
 
 # ------------------------------------------------- 3) 逐基因 MR ------------
+# gwas_clean 只是分析子集（显著位点窗口 + P<1e-4），工具变量可能不在里面。
+# 缺哪个就从全量 LDSC 文件里回捞，别让 harmonise 静默少行。
+miss <- setdiff(inst$SNP, outcome_all$SNP)
+if (length(miss)) {
+  log_msg("分析子集缺 ", length(miss), " 个工具变量，从全量 sumstats 回捞")
+  extra <- subset_by_snp(proj_path("data", "processed", "gwas_ldsc.sumstats.gz"), miss,
+                         cols = c("SNP", "A1", "A2", "BETA", "SE", "P", "N"),
+                         types = c("character", "character", "character",
+                                   "numeric", "numeric", "numeric", "numeric"))
+  if (nrow(extra)) {
+    extra <- data.frame(SNP = extra$SNP, A1 = extra$A1, A2 = extra$A2,
+                        beta = extra$BETA, se = extra$SE, p = extra$P,
+                        EAF = NA_real_, N = extra$N, INFO = NA_real_,
+                        CHR = NA_integer_, POS = NA_real_, pos_key = NA_character_,
+                        stringsAsFactors = FALSE)
+    outcome_all <- rbind(outcome_all, extra)
+    log_msg("  回捞到 ", nrow(extra), " 个（双等位基因型已知，EAF 缺失）")
+  }
+}
+
 # 结局列名对齐 TwoSampleMR 要求
 out_df <- data.frame(SNP = outcome_all$SNP, beta = outcome_all$beta, se = outcome_all$se,
                      ea = outcome_all$A1, nea = outcome_all$A2,
