@@ -133,9 +133,14 @@ run_cellchat <- function(obj, label) {
   data.input <- get_mat(obj, "data")
   meta <- data.frame(labels = obj$cell_type, row.names = colnames(obj))
   cc <- CellChat::createCellChat(object = data.input, meta = meta, group.by = "labels")
-  cc@DB <- CellChat::CellChatDB.human
+  # 某些安装下 CellChatDB.human 惰性加载是空的（subsetData 后 data.signaling 0 行），
+  # 必须 data() 显式加载再塞进 @DB
+  suppressWarnings(utils::data("CellChatDB.human", package = "CellChat", envir = environment()))
+  cc@DB <- CellChatDB.human
   cc <- CellChat::subsetData(cc)
-  cc <- CellChat::identifyOverExpressedGenes(cc)
+  # 不装 presto：identifyOverExpressedGenes 默认 do.fast=TRUE 需要 presto 的
+  # 快速 Wilcoxon；标准实现慢一点但结果一致
+  cc <- CellChat::identifyOverExpressedGenes(cc, do.fast = FALSE)
   cc <- CellChat::identifyOverExpressedInteractions(cc)
   cc <- CellChat::computeCommunProb(cc, raw.use = TRUE, population.size = TRUE)
   cc <- CellChat::filterCommunication(cc, min.cells = 10)

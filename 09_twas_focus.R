@@ -26,6 +26,13 @@ tcfg <- cfg_get(cfg, "genetics.twas", list())
 fusion_dir <- proj_path(tcfg$fusion_dir %||% "tools/FUSION")
 sumstats <- proj_path("data", "processed", "gwas_ldsc.sumstats.gz")
 require_file(sumstats, "先跑 07_gwas_qc.R 生成 LDSC 格式的 sumstats")
+# FUSION 每次调用都要重新读 sumstats；全量 830 万行 × 132 次 = 7 小时起。
+# 它实际只能用 LDREF 面板里的 SNP，先做一次交集（115 万行）能快 ~6 倍。
+ss_small <- proj_path("data", "processed", "gwas_ldsc_1kg.gz")
+if (file.exists(ss_small)) {
+  log_msg("使用 LDREF 交集精简 sumstats（", ss_small, "）")
+  sumstats <- ss_small
+}
 require_file(file.path(fusion_dir, "FUSION.assoc_test.R"),
              paste0("FUSION 下载：https://github.com/gusevlab/fusion_twas ，解压到 ", fusion_dir))
 
@@ -53,9 +60,16 @@ run_fusion_chr <- function(tissue, chr, cfg) {
     log_msg("已存在，跳过：", out)
     return(out)
   }
+  # FUSION 的 --weights 是 pos 清单文件（表头 WGT ID CHR P0 P1），不是逗号列表；
+  # 拼进命令行还会超 Windows 32K 长度上限。权重 tar 自带 GTEx.<tissue>.pos，
+  # FUSION 内部会按 --chr 过滤，直接传全量清单即可
+  wl <- file.path(wdir, sprintf("GTEx.%s.pos", tissue))
+  if (!file.exists(wl)) {
+    log_msg("缺权重清单 ", wl, "，跳过该组织"); return(NULL)
+  }
   args <- c(file.path(fusion_dir, "FUSION.assoc_test.R"),
             "--sumstats", sumstats,
-            "--weights", paste(wgts, collapse = ","),
+            "--weights", wl,
             "--weights_dir", wdir,
             "--ref_ld_chr", paste0(ld_ref, "."),
             "--chr", chr,
@@ -81,11 +95,18 @@ if (!length(dat_files)) {
   log_msg("没有 FUSION 输出，后续步骤跳过。请检查权重文件与 LD 面板。")
 } else {
   twas <- do.call(rbind, lapply(dat_files, function(f) {
-    d <- tryCatch(utils::read.delim(f, stringsAsFactors = FALSE), error = function(e) NULL)
+    d <- tryCatch(utils::read.delim(f, stringsAsFactors = FALSE,
+                                      colClasses = "character"), error = function(e) NULL)
     if (is.null(d) || !nrow(d)) return(NULL)
     d$tissue <- sub("\\.chr[0-9]+\\.dat$", "", basename(f))
     d
   }))
+  # read.delim 对 FUSION 的科学计数 P 值会给出字符列（有的行是 "1e-48"、有的是 NA），
+  # 字符列上的 "<" 是字典序比较："1.0" < "2.6e-6" 为真，显著表会涌进上万个假阳性
+  for (cn in intersect(c("CHR", "P0", "P1", "TWAS.Z", "TWAS.P", "HSQ",
+                         "EQTL.R2", "NSNP", "NWGT", "BEST.GWAS.Z"), names(twas))) {
+    twas[[cn]] <- suppressWarnings(as.numeric(twas[[cn]]))
+  }
   if (!is.null(twas) && nrow(twas)) {
     need <- c("ID", "TWAS.Z", "TWAS.P")
     if (all(need %in% names(twas))) {

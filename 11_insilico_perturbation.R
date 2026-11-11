@@ -37,6 +37,16 @@ obj <- readRDS(obj_path)
 if (!"cell_type" %in% names(obj@meta.data)) {
   stop("单细胞对象缺 cell_type 列：先用 06 注释，或把原文注释写进 meta.data", call. = FALSE)
 }
+# scrna.rds 是只含 counts 的原始对象（06 才做归一化）；这里直接用就得自己归一化，
+# 否则 "Layer 'data' is empty"，所有基因都进不了网络
+{
+  d <- tryCatch(Seurat::GetAssayData(obj, assay = "RNA", layer = "data"),
+                error = function(e) NULL)
+  if (is.null(d) || (inherits(d, "dgCMatrix") && nnzero(d) == 0)) {
+    log_msg("对象未归一化，先 NormalizeData")
+    obj <- Seurat::NormalizeData(obj, verbose = FALSE)
+  }
+}
 
 get_mat <- function(o, what = "data") {
   tryCatch(Seurat::GetAssayData(o, assay = "RNA", layer = what),
@@ -44,13 +54,25 @@ get_mat <- function(o, what = "data") {
 }
 
 # ------------------------------------------------- 1) 疾病特征 --------------
+# 共识基因只有 5 个，score_delta 要求网络 ∩ 特征 >= 20 个基因，用共识集必然
+# 全部跳过；改用发现集（GSE27276）的显著 DEG 做方向参照，共识基因仍留在
+# 表里被评到（在 FDR<0.05 的 DEG 里）
 sig_file <- res_path(cfg, "tables", "deg_consensus.tsv")
-require_file(sig_file, "先跑 02_deg_limma.R 得到 deg_consensus.tsv")
-sig <- utils::read.delim(sig_file, stringsAsFactors = FALSE)
+deg_file <- res_path(cfg, "tables", "deg_GSE27276.tsv")
+if (!file.exists(deg_file)) deg_file <- sig_file
+require_file(deg_file, "先跑 02_deg_limma.R 得到 DEG 表")
+sig <- utils::read.delim(deg_file, stringsAsFactors = FALSE)
 lf_col <- grep("^logFC", names(sig), value = TRUE)[1]
-if (is.na(lf_col)) stop("共识基因表里找不到 logFC 列", call. = FALSE)
+pv_col <- grep("^(adj.P.Val|FDR|p_adj)", names(sig), value = TRUE)[1]
+if (is.na(lf_col)) stop("DEG 表里找不到 logFC 列", call. = FALSE)
+if (!is.na(pv_col)) {
+  keep <- stats::p.adjust(as.numeric(sig[[pv_col]]), "BH") < 0.05
+  keep[is.na(keep)] <- FALSE
+  if (sum(keep) >= 20) sig <- sig[keep, , drop = FALSE]
+}
 sig_map <- stats::setNames(as.numeric(sig[[lf_col]]), sig$gene)
 sig_map <- sig_map[is.finite(sig_map) & sig_map != 0]
+log_msg("疾病特征（发现集 FDR<0.05）：", length(sig_map), " 个基因")
 
 cts <- intersect(pcfg$celltypes %||% c("TM", "JCT"), unique(as.character(obj$cell_type)))
 if (!length(cts)) stop("cell_type 中没有目标细胞类型；现有：",
@@ -124,6 +146,9 @@ for (ct in cts) {
     vf <- rownames(mat)[order(vr, decreasing = TRUE)]
   }
   vf <- vf[seq_len(min(hvg_n, length(vf)))]
+  # 扰动目标必须进网络，否则 LOX/LOXL1 这类"方差排名 2000 名开外"的基因
+  # 永远轮不到被扰动
+  vf <- union(intersect(targets, rownames(mat)), vf)
   mat <- as.matrix(mat[vf, , drop = FALSE])
   # 只保留在疾病特征里有方向的基因做评分，其余基因仍参与建网（提供传播路径）
   log_msg(ct, "：", ncol(mat), " 细胞 × ", nrow(mat), " 基因建网")

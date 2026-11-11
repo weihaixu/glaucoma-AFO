@@ -211,14 +211,15 @@ drylab:
   mediation:
     iop_gwas: "data/raw/iop_gwas.tsv.gz"   # UKB / FinnGen / 已发表 IOP GWAS
     p_threshold: 5e-8
+    # GCST009413（Bonnemaijer 2021，IGGC 31,269 EUR）的实际列名；
+    # MAF 列与效应等位基因未对齐，回文 SNP 宁可让 harmonise 当未知剔除（eaf 不映射）
     cols:
       snp: "SNP"
-      beta: "BETA"
-      se: "SE"
-      pval: "P"
-      ea: "A1"
-      nea: "A2"
-      eaf: "FRQ"                    # 无频率列可删掉这一行，脚本会置 NA
+      beta: "Effect"
+      se: "StdErr"
+      pval: "P-value"
+      ea: "EffectAllele"
+      nea: "NonEffectAllele"
 
   # 14：跨物种保守性（人 / 猴 / 鼠）
   cross_species:
