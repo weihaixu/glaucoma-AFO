@@ -38,3 +38,6 @@ tools/monocle3_src/
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# ---- package index snapshots (re-downloadable, setup-time only) ----
+downloads/
