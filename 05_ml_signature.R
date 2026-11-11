@@ -36,32 +36,49 @@ y <- factor(pheno$group, levels = c("control", "case"))
 if (any(table(y) < 5)) stop("分组样本过少（每组需 >=5），不适合建模")
 
 # ------------------------------------------------- 1) 候选基因 --------------
-cand <- list()
-f_deg <- res_path(cfg, "tables", "deg_consensus.tsv")
-if (file.exists(f_deg)) {
-  cand$deg <- utils::read.delim(f_deg, stringsAsFactors = FALSE)$gene
-} else {
-  tt <- utils::read.delim(res_path(cfg, "tables", paste0("deg_", train_gse, ".tsv")),
-                          stringsAsFactors = FALSE)
-  cand$deg <- tt$gene[tt$sig != "NS"]
-}
+# 候选池按证据强度逐级回退。
+# 原实现只有一个 DEG 变量：有共识集时它被共识集顶替，回退路径又用它，
+# 于是"2 万个基因的矩阵"最后只用 5 个共识基因建模 —— 候选池退化而不报错，
+# LASSO 选中 3 个、SVM-RFE 选 2 个，看起来一切正常，其实签名就是共识集本身。
+tt_train <- utils::read.delim(res_path(cfg, "tables", paste0("deg_", train_gse, ".tsv")),
+                              stringsAsFactors = FALSE)
+deg_train <- tt_train$gene[tt_train$sig != "NS"]
+
+f_cons <- res_path(cfg, "tables", "deg_consensus.tsv")
+cons <- if (file.exists(f_cons)) {
+  utils::read.delim(f_cons, stringsAsFactors = FALSE)$gene
+} else character(0)
+
 f_w <- res_path(cfg, "tables", "wgcna_hub_genes.tsv")
-if (file.exists(f_w)) {
-  hub <- utils::read.delim(f_w, stringsAsFactors = FALSE)
-  cand$wgcna <- unique(hub$gene)
+hubs <- if (file.exists(f_w)) {
+  unique(utils::read.delim(f_w, stringsAsFactors = FALSE)$gene)
+} else character(0)
+
+pool <- list(
+  "共识∩WGCNA"  = if (length(cons) && length(hubs)) intersect(cons, hubs) else character(0),
+  "共识"        = cons,
+  "DEG∩WGCNA"   = if (length(hubs)) intersect(deg_train, hubs) else character(0),
+  "DEG"         = deg_train
+)
+cand <- list()
+for (nm in names(pool)) {
+  g <- intersect(pool[[nm]], rownames(expr))
+  if (length(g) >= 10) {
+    log_msg("候选池取「", nm, "」：", length(g), " 个基因")
+    cand$all <- g
+    cand$source <- nm
+    break
+  }
+  log_msg("候选池「", nm, "」仅 ", length(g), " 个（<10），降级")
 }
-cand$all <- Reduce(intersect, cand)
-if (length(cand$all) < 10) {
-  log_msg("交集候选基因仅 ", length(cand$all), " 个，回退为 DEG ∩ 表达矩阵")
-  cand$all <- intersect(cand$deg, rownames(expr))
-}
+if (!length(cand$all)) cand$all <- intersect(pool[["DEG"]], rownames(expr))
 cand$all <- intersect(cand$all, rownames(expr))
 if (!length(cand$all)) {
   stop("候选基因为 0：常见原因是 DEG 阈值过严（bulk.deg.fdr/logfc）或数据无信号。",
        "先看 results/tables/deg_", train_gse, ".tsv 里 sig 列非 NS 的行数。", call. = FALSE)
 }
 log_msg("候选基因 ", length(cand$all), " 个")
-write_tsv(data.frame(gene = cand$all, source = "DEG∩WGCNA"), "ml_candidate_genes", cfg)
+write_tsv(data.frame(gene = cand$all, source = cand$source), "ml_candidate_genes", cfg)
 
 X <- t(expr[cand$all, , drop = FALSE])
 Xz <- scale(X)   # 建模统一用 z-score，便于跨平台迁移
@@ -188,7 +205,9 @@ if (length(sig) < 2) {
 }
 log_msg("最终 signature：", paste(sig, collapse = ", "))
 
-dat <- data.frame(Xz[, sig, drop = FALSE], group = y)
+# check.names = FALSE 是必须的：默认会把 HLA-DPA1 改写成 HLA.DPA1，
+# 模型系数的名字随之变形，等到外部验证按原始符号取列时就 object not found。
+dat <- data.frame(Xz[, sig, drop = FALSE], group = y, check.names = FALSE)
 mod <- stats::glm(group ~ ., data = dat, family = stats::binomial())
 coefs <- summary(mod)$coefficients
 sig_tab <- data.frame(gene = rownames(coefs),
@@ -390,7 +409,7 @@ for (v in valid_gse) {
   if (length(gv) < 2) { log_msg(v, " 可用基因不足，跳过"); next }
   Xv <- scale(t(ev[gv, , drop = FALSE]))
   colnames(Xv) <- gv
-  newd <- as.data.frame(Xv)
+  newd <- as.data.frame(Xv, check.names = FALSE)
   # 缺失基因用 0（即训练集均值）代替，等价于「该基因取人群平均表达」
   for (g in setdiff(sig, gv)) newd[[g]] <- 0
   pv_prob <- as.numeric(stats::predict(mod, newdata = newd[, sig, drop = FALSE], type = "response"))

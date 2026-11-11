@@ -41,3 +41,9 @@ desktop.ini
 
 # ---- package index snapshots (re-downloadable, setup-time only) ----
 downloads/
+
+# 外部工具二进制（plink/plink2/SMR 等，合计约 80 MB，脚本会自行下载）
+tools/bin/
+
+# 下载下来的原始数据/注释包，体积大且可重新获取
+downloads/

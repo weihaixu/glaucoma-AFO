@@ -196,16 +196,90 @@ geo_series_dir <- function(gse) paste0(substr(gse, 1, nchar(gse) - 3), "nnn")
 # GPL6883 -> GPLnnn
 geo_platform_dir <- function(gpl) paste0(substr(gpl, 1, nchar(gpl) - 3), "nnn")
 
+# --- 下载：多通道自适应 -----------------------------------------------------
+# 为什么要写这么长：在 Windows 上 utils::download.file 会栽在证书吊销检查上
+# （schannel 连不上 CRL 服务器），报 "SSL connect error" 或 wininet 的
+# "不能连接到吊销服务器"，同一个 URL 换 `curl --ssl-no-revoke` 就通。
+# 这种报错看起来像"被墙"，极易误判成网络不可用、进而放弃跑真实数据。
+# 所以按顺序试几条通道，谁通用谁，并把成功的那条写进日志——换台机器再跑时，
+# 日志能直接说明哪条路走得通。
+dl_transports <- function() {
+  out <- c("R-libcurl", "R-wininet")
+  if (nzchar(Sys.which("curl"))) out <- c(out, "curl-no-revoke", "curl-direct")
+  out
+}
+
+dl_once <- function(url, dest, how, timeout = 3600) {
+  unlink(dest)
+  if (how == "R-libcurl") {
+    tryCatch(utils::download.file(url, dest, mode = "wb", quiet = TRUE, method = "libcurl"),
+             error = function(e) NULL)
+  } else if (how == "R-wininet") {
+    tryCatch(utils::download.file(url, dest, mode = "wb", quiet = TRUE, method = "wininet"),
+             error = function(e) NULL)
+  } else {
+    args <- c("--fail", "--location", "--silent", "--show-error",
+              "--retry", "3", "--retry-delay", "2",
+              "--connect-timeout", "60", "--max-time", timeout,
+              "--output", dest)
+    # 只在不做吊销检查的那条通道上加这个开关；老版本 curl 不认识会直接报错，
+    # 所以不能无条件加。
+    if (how == "curl-no-revoke" && .Platform$OS.type == "windows") {
+      args <- c(args, "--ssl-no-revoke")
+    }
+    if (how == "curl-direct") args <- c(args, "--noproxy", "*")
+    args <- c(args, url)
+    suppressWarnings(system2(unname(Sys.which("curl")), args, stdout = TRUE, stderr = TRUE))
+  }
+  file.exists(dest) && file.size(dest) > 0
+}
+
+# 远端文件字节数（HEAD）。拿不到就返回 NA —— 网络不通时不该阻塞已有缓存。
+dl_remote_size <- function(url, timeout = 60) {
+  cur <- Sys.which("curl")
+  if (!nzchar(cur)) return(NA_real_)
+  args <- c("-sS", "--noproxy", "*", "--head",
+            "--connect-timeout", "30", "--max-time", timeout)
+  if (.Platform$OS.type == "windows") args <- c(args, "--ssl-no-revoke")
+  h <- suppressWarnings(system2(unname(cur), c(args, url), stdout = TRUE, stderr = FALSE))
+  ln <- grep("^[Cc]ontent-[Ll]ength:", h, value = TRUE)
+  if (!length(ln)) return(NA_real_)
+  suppressWarnings(as.numeric(trimws(sub("^[^:]*:", "", ln[1]))))
+}
+
 download_if_missing <- function(url, dest) {
-  if (file.exists(dest) && file.size(dest) > 0) return(invisible(dest))
+  if (file.exists(dest) && file.size(dest) > 0) {
+    # 缓存也要核对：曾有一次 soft 下载被中断，残片以 <GPL>_annot.txt.gz 的名字
+    # 留下，后续所有运行都把它当注释表读，探针只映射上 1/4，而日志里看不出来。
+    want <- dl_remote_size(url)
+    if (is.na(want) || file.size(dest) == want) return(invisible(dest))
+    log_msg("缓存不完整（", file.size(dest), " / ", want, " 字节），重新下载：", basename(dest))
+    unlink(dest)
+  }
   dir.create(dirname(dest), recursive = TRUE, showWarnings = FALSE)
   log_msg("下载：", url)
-  tryCatch(
-    utils::download.file(url, dest, mode = "wb", quiet = TRUE),
-    error = function(e) stop("下载失败：", url, "\n  ", conditionMessage(e), call. = FALSE)
-  )
-  if (file.size(dest) == 0) stop("下载得到空文件：", url, call. = FALSE)
-  invisible(dest)
+  want <- dl_remote_size(url)
+  if (!is.na(want)) log_msg("  远端大小 ", format(want, big.mark = ","), " 字节")
+
+  tried <- character(0)
+  for (how in dl_transports()) {
+    if (dl_once(url, dest, how)) {
+      if (!is.na(want) && file.size(dest) != want) {
+        log_msg("  通道 ", how, " 截断（", file.size(dest), " / ", want, " 字节），丢弃")
+        unlink(dest)
+        tried <- c(tried, paste0(how, "(截断)"))
+        next
+      }
+      log_msg("  通道 ", how, " 成功（", format(file.size(dest), big.mark = ","), " 字节）")
+      return(invisible(dest))
+    }
+    tried <- c(tried, how)
+    log_msg("  通道 ", how, " 失败")
+  }
+  unlink(dest)
+  stop("下载失败：", url, "\n  已尝试的通道：", paste(tried, collapse = " / "),
+       "\n  若只有 R-libcurl 与 R-wininet 报 SSL/吊销 错误，说明本机需要 ",
+       "curl 命令（Windows 10 以上自带）或检查代理设置。", call. = FALSE)
 }
 
 # 手动解析 series matrix（比 GEOquery 更稳，且不依赖 Bioconductor 版本）
@@ -246,23 +320,77 @@ read_series_matrix <- function(path) {
   list(expr = expr, pheno = pheno, id_col = id_col)
 }
 
+# 平台 -> Bioconductor 注释包。只在 GEO 拿不到 annot 时才用：
+# GPL5175（Affy Human Exon 1.0 ST）的 soft 有 4.5 GB，annot 是 404，
+# 而 huex10sttranscriptcluster.db 只有 12 MB，探针号就是转录簇 ID。
+gpl_probe_db <- function(gpl) {
+  reg <- c(GPL5175 = "huex10sttranscriptcluster.db",
+           GPL570  = "hgu133plus2.db",
+           GPL6883 = "illuminaHumanv3.db")
+  if (!gpl %in% names(reg)) return(NULL)
+  reg[[gpl]]
+}
+
+# 用 Bioconductor 注释包产出 data.frame(probe, symbol)
+annotation_from_db <- function(gpl) {
+  pkg <- gpl_probe_db(gpl)
+  if (is.null(pkg)) return(NULL)
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    log_msg("注释包 ", pkg, " 未安装，跳过")
+    return(NULL)
+  }
+  db <- getExportedValue(pkg, pkg)
+  keys <- AnnotationDbi::keys(db, keytype = "PROBEID")
+  m <- suppressMessages(AnnotationDbi::select(db, keys = keys,
+                                              columns = "SYMBOL", keytype = "PROBEID"))
+  m <- m[!is.na(m$SYMBOL) & m$SYMBOL != "", , drop = FALSE]
+  n_multi <- sum(duplicated(m$PROBEID))
+  # 一号多基因（如 2315554 -> TTLL10 + MIR200B/200A/429）取注释里第一条，
+  # 即平台的 primary assignment；按字母排序会挑到 MIR，那是错的。
+  m <- m[!duplicated(m$PROBEID), , drop = FALSE]
+  log_msg("注释来源：Bioconductor ", pkg, "（", nrow(m), " 探针；",
+          n_multi, " 个探针一对多，取主注释）")
+  data.frame(probe = as.character(m$PROBEID), symbol = m$SYMBOL,
+             stringsAsFactors = FALSE)
+}
+
 # 读取 GPL 注释表，返回 data.frame(probe, symbol)
-# 优先本地 data/annotation/<GPL>_annot.txt.gz，其次自动下载 annot 文件
+# 优先本地 data/annotation/<GPL>_annot.txt.gz，其次自动下载注释文件
+# 顺序按可用性排：GEO 上 <GPL>.annot.gz 是绝大多数平台唯一存在的注释
+# （旧代码只试 <GPL>_full.txt.gz，该文件对 GPL2507/GPL570/GPL6883 全是 404），
+# 最后才回退 soft —— soft 里平台表与样本表混在一起，只有平台表那段能用。
 read_gpl_annotation <- function(gpl, cfg) {
   local <- proj_path("data", "annotation", paste0(gpl, "_annot.txt.gz"))
   if (!file.exists(local)) {
-    url <- paste0("https://ftp.ncbi.nlm.nih.gov/geo/platforms/",
-                  geo_platform_dir(gpl), "/", gpl, "/annot/", gpl, "_full.txt.gz")
-    tryCatch(download_if_missing(url, local), error = function(e) {
-      url2 <- paste0("https://ftp.ncbi.nlm.nih.gov/geo/platforms/",
-                     geo_platform_dir(gpl), "/", gpl, "/soft/", gpl, "_family.soft.gz")
-      log_msg("annot 文件不可用，回退 soft：", url2)
-      download_if_missing(url2, local)
-    })
+    base <- paste0("https://ftp.ncbi.nlm.nih.gov/geo/platforms/",
+                   geo_platform_dir(gpl), "/", gpl)
+    cand <- c(paste0(base, "/annot/", gpl, ".annot.gz"),
+              paste0(base, "/annot/", gpl, "_full.txt.gz"))
+    # soft 是最后的兜底，但有的平台 soft 大得离谱（GPL5175 有 4.5 GB），
+    # 而 Bioconductor 有等价注释包时就完全没必要下 —— 直接跳过。
+    if (is.null(gpl_probe_db(gpl))) {
+      cand <- c(cand, paste0(base, "/soft/", gpl, "_family.soft.gz"))
+    }
+    for (u in cand) {
+      ok <- tryCatch({download_if_missing(u, local); TRUE},
+                     error = function(e) { log_msg("注释源不可用：", basename(u)); FALSE })
+      if (ok) { log_msg("注释来源：", basename(u)); break }
+    }
+    # 第三条路：GEO 上没有 annot、soft 又大到不合理时，用 Bioconductor 注释包
+    if (!file.exists(local)) {
+      a <- annotation_from_db(gpl)
+      if (!is.null(a)) return(a)
+      stop("拿不到 ", gpl, " 的注释文件（GEO 无 annot，Bioconductor 也无对应包）",
+           call. = FALSE)
+    }
   }
   con <- gzfile(local, "rt")
   on.exit(close(con), add = TRUE)
   lines <- readLines(con, warn = FALSE)
+  # soft 里若混进多个表块，只取第一个 !platform_table_begin..end
+  b1 <- grep("^!platform_table_begin", lines)
+  e1 <- grep("^!platform_table_end", lines)
+  if (length(b1) && length(e1)) lines <- lines[(b1[1] + 1):(e1[1] - 1)]
   keep <- !grepl("^[#!^]", lines)
   lines <- lines[keep]
   tab <- utils::read.delim(text = lines, header = TRUE, check.names = FALSE,
@@ -270,7 +398,15 @@ read_gpl_annotation <- function(gpl, cfg) {
   cand <- c("Gene symbol", "GENE_SYMBOL", "Gene_Symbol", "Symbol", "GENE",
             "ILMN_Gene", "gene_assignment", "Gene Symbol")
   sym_col <- intersect(cand, names(tab))[1]
-  stopifnot(!is.na(sym_col))
+  if (is.na(sym_col)) {
+    # 表里没有基因符号列 = 这文件不是注释表（多半是别的平台文件误命名落在这里）
+    log_msg(basename(local), " 没有基因符号列，丢弃该文件")
+    close(con); on.exit(NULL, add = FALSE)
+    unlink(local)
+    a <- annotation_from_db(gpl)
+    if (!is.null(a)) return(a)
+    stop("注释文件格式不可识别且无替代来源：", local, call. = FALSE)
+  }
   sym <- as.character(tab[[sym_col]])
   if (sym_col == "gene_assignment") {           # Affymetrix: "NM_x // SYMBOL // ..."
     sym <- vapply(strsplit(sym, " // ", fixed = TRUE),
@@ -302,9 +438,14 @@ collapse_probes <- function(expr, annot) {
   expr
 }
 
+# 是否已经在 log2 尺度上：log2 后的芯片数据 99% 分位通常在 4–16，
+# 原始强度则在数百到数万。原来这里写的是 `q > thr`，函数名说"是 log"、
+# 判断却返回"是原始"，调用处再取反，结果两组数据全判反：
+# 已是 log2 的 GSE27276 / GSE45570 被二次 log2（动态范围压成 1.2），
+# 而原始强度的 GSE4316 完全没转换（limma 报出 logFC 6105）。
 is_log_scale <- function(expr, thr = 50) {
   q <- stats::quantile(expr, 0.99, na.rm = TRUE)
-  q > thr
+  is.finite(q) && q <= thr
 }
 
 zscore_rows <- function(mat) t(scale(t(mat)))

@@ -18,19 +18,25 @@ project:
 # -----------------------------------------------------------------------------
 bulk:
   # 训练集（必须有分组信息；GSE27276 为 17 POAG vs 19 对照的小梁网）
+  # 平台号必须与 series matrix 里 !Series_platform_id 一致，写错不会报错，
+  # 只会把探针映射到别的芯片上、结果全废。留空则由脚本自动读取（推荐）。
   train:
     gse: "GSE27276"
-    gpl: "GPL6883"         # 若不确定，留空则由脚本从 series matrix 自动读取
+    gpl: "GPL2507"         # 实测 !Series_platform_id = GPL2507（Illumina HumanRef-8），不是 GPL6883
     group_regex: "POAG|glaucoma"   # 命中该正则视为病例组，其余为对照
     batch: null            # 若 pheno 中有批次列，填列名，如 "batch"
   # 外部验证集（可多个；脚本用交集基因做 z-score 标准化后验证）
+  # exclude_regex：命中即剔除该样本。用于把"看着像对照、其实不是"的样本去掉，
+  # 不写就会按"其余即对照"混进对照组。
   valid:
     - gse: "GSE4316"
       gpl: "GPL570"
       group_regex: "glaucoma|POAG"
+      exclude_regex: "Cultured"        # 3 例原代培养细胞不是组织；剔完剩 3 对照 + 2 POAG
     - gse: "GSE45570"
-      gpl: "GPL570"
+      gpl: "GPL5175"       # 实测 GPL5175（Affy Human Exon 1.0 ST），不是 GPL570
       group_regex: "glaucoma|POAG"
+      exclude_regex: "Ocular Hypertension"   # 6 例高眼压不是正常对照；剔完 6 vs 6
 
   # 探针过滤与标准化
   qc:

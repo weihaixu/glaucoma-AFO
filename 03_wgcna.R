@@ -74,7 +74,10 @@ log_msg("采用 soft power = ", power)
 # ------------------------------------------------- 3) 建网与模块 -------------
 net <- WGCNA::blockwiseModules(
   datExpr, power = power,
-  maxBlockSize = 20000,
+  # 20000 会让 13k 基因全部落进一个块：TOM 是 13k x 13k 的稠密矩阵，
+  # 内存上到 3 GB 以上、实际耗时十几分钟且没有进度输出（实测在 12 分钟处仍卡住）。
+  # WGCNA 官方对大矩阵的建议是 5000 分块，块内基因数小一个量级，总耗时反而更短。
+  maxBlockSize = min(cfg_get(cfg, "bulk.wgcna.block_size", 5000), ncol(datExpr)),
   TOMType = cfg_get(cfg, "bulk.wgcna.tom_type", "signed"),
   networkType = cfg_get(cfg, "bulk.wgcna.network_type", "signed"),
   minModuleSize = cfg_get(cfg, "bulk.wgcna.min_module_size", 30),
@@ -87,6 +90,7 @@ net <- WGCNA::blockwiseModules(
 )
 module_color <- net$colors
 names(module_color) <- colnames(datExpr)
+me_raw <- net$MEs          # 保留 "ME<颜色>" 命名，signedKME 要自己从第 3 个字符开始取
 me <- net$MEs
 colnames(me) <- sub("^ME", "", colnames(me))
 log_msg("识别模块 ", length(unique(module_color)), " 个（含 grey）")
@@ -156,7 +160,11 @@ g_hm <- ggplot2::ggplot(df_hm, ggplot2::aes(trait, module, fill = r)) +
 save_fig(g_hm, paste0("wgcna_module_trait_", gse), cfg, 6, 0.35 * nrow(modT) + 2)
 
 # ------------------------------------------------- 5) hub 基因 ---------------
-kME <- WGCNA::signedKME(datExpr, me, corFnc = "bicor")
+# 必须传 me_raw（列名 "MEred"）：signedKME 内部写的是
+# paste0("kME", substring(colnames(datME), 3))，传进来的列名若已是 "red"，
+# 取第 3 个字符往下就只剩 "d"，于是所有列变成 kMEd / kMEown / kMEan，
+# 下游按 kME<颜色> 取列全部落空，hub 表恒为空（模块相关性再强也救不回来）。
+kME <- WGCNA::signedKME(datExpr, me_raw, corFnc = "bicor")
 kME_df <- data.frame(gene = rownames(kME), kME, module = module_color[rownames(kME)])
 write_tsv(kME_df, "wgcna_gene_modules", cfg)
 

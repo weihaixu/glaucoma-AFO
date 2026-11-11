@@ -134,7 +134,10 @@ for (v in valid_gse) {
   log_msg("验证集 ", v, "：上调 ", sum(r$tt$sig == "Up"), "，下调 ", sum(r$tt$sig == "Down"))
 }
 
-# 共识基因：训练集显著 + 至少一个验证集 p<0.05 且方向一致
+# 共识基因：训练集显著 + 在所有验证集都测得 + 至少在其中一个验证集同向复现。
+# 原实现写的是 `is.na(lf) | (...)`，把"该验证集根本没测到这个基因"当成通过；
+# 两个平台基因数不同（13,118 vs 13,468），凭空多算出一批"共识"，而 Venn 中心是 0——
+# 图和表当场打架。缺失只能算"不可验证"，不能算"通过"。
 if (length(valid_res)) {
   sig_tr <- tt_train[tt_train$sig != "NS", c("gene", "logFC", "adj.P.Val")]
   names(sig_tr)[2:3] <- c("logFC_train", "fdr_train")
@@ -143,56 +146,58 @@ if (length(valid_res)) {
     names(vt) <- c("gene", paste0(c("logFC_", "p_"), v))
     sig_tr <- merge(sig_tr, vt, by = "gene", all.x = TRUE)
   }
-  ok <- rep(TRUE, nrow(sig_tr))
+  measured <- rep(TRUE, nrow(sig_tr))
+  replicated <- rep(FALSE, nrow(sig_tr))
   for (v in names(valid_res)) {
-    lf <- sig_tr[[paste0("logFC_", v)]]; pv <- sig_tr[[paste0("p_", v)]]
-    ok <- ok & (is.na(lf) | (sign(lf) == sign(sig_tr$logFC_train) & pv < 0.05))
+    lf <- sig_tr[[paste0("logFC_", v)]]
+    pv <- sig_tr[[paste0("p_", v)]]
+    m <- !is.na(lf)
+    measured <- measured & m
+    hit <- m & !is.na(pv) & pv < 0.05 & sign(lf) == sign(sig_tr$logFC_train)
+    replicated <- replicated | hit
+    log_msg("  ", v, "：同向复现 ", sum(hit), " / ", nrow(sig_tr),
+            "（该平台未测到 ", sum(!m), " 个）")
   }
-  consensus <- sig_tr[ok, ]
+  consensus <- sig_tr[measured & replicated, ]
   consensus <- consensus[order(consensus$fdr_train), ]
   write_tsv(consensus, "deg_consensus", cfg)
-  log_msg("方向一致共识基因：", nrow(consensus), " 个")
+  log_msg("共识基因：", nrow(consensus), " 个（各验证集均测得，且至少一个验证集同向复现）")
+  if (!nrow(consensus)) {
+    log_msg("[WARN] 共识集为空：04/05 会自动回退到训练集 DEG，",
+            "但正文凡引用 {{N_CONSENSUS}} 的句子都要按真实结果改写")
+  }
 
-  # --- Fig2D：两集合重叠（Fig2D 在正文被引用，必须真的出图）------------------
-  # 中心格的数字必须与 deg_consensus 行数相等，否则图和账本的 N_CONSENSUS 打架。
-  # 因此验证集一侧取「在所有验证集中都方向一致」的基因（与 consensus 的定义同构），
-  # 而不是「任一验证集显著」——后者在有两个验证集时会多出人。
-  conc_of <- function(v) {
-    vt <- valid_res[[v]][, c("gene", "logFC", "P.Value")]
-    m <- merge(vt, sig_tr[, c("gene", "logFC_train")], by = "gene")
-    m$gene[!is.na(m$P.Value) & m$P.Value < 0.05 &
-             sign(m$logFC) == sign(m$logFC_train)]
-  }
-  set_b <- Reduce(intersect, lapply(names(valid_res), conc_of))
-  set_a <- unique(sig_tr$gene)
-  n_a <- length(set_a); n_b <- length(set_b)
-  n_ab <- length(intersect(set_a, set_b))
-  if (n_ab != nrow(consensus)) {
-    log_msg("[WARN] Venn 中心数 ", n_ab, " 与共识表 ", nrow(consensus), " 不一致")
-  }
-  # 不引入 VennDiagram / ggvenn：两者都只是画两个圆，却各带一串依赖。
+  # --- Fig2D：发现集与可复现集的关系 -------------------------------------------
+  # 复现集必然是发现集的子集；画成两个交叠的圆，读者只会以为半径画错了。
+  # 改成嵌套图：外圈 = 发现集，内圈 = 可复现集，面积按比例。
+  n_a <- nrow(sig_tr); n_b <- nrow(consensus)
   circ <- function(cx, cy, r, n = 240) {
     th <- seq(0, 2 * pi, length.out = n)
     data.frame(x = cx + r * cos(th), y = cy + r * sin(th))
   }
+  r_out <- 0.95
+  r_in <- max(r_out * sqrt(max(n_b, 1) / max(n_a, 1)), 0.17)
   g_venn <- ggplot2::ggplot() +
-    ggplot2::geom_polygon(data = circ(1.14, 0, 0.95), ggplot2::aes(x, y),
-                          fill = "#1F6FB4", alpha = 0.18, colour = "#1F6FB4", linewidth = 0.4) +
-    ggplot2::geom_polygon(data = circ(1.96, 0, 0.95), ggplot2::aes(x, y),
-                          fill = "#C0392B", alpha = 0.18, colour = "#C0392B", linewidth = 0.4) +
-    ggplot2::annotate("text", x = c(0.80, 2.30, 1.55), y = 0.05,
-                      label = c(n_a - n_ab, n_b - n_ab, n_ab),
-                      size = 4.6, colour = "grey15") +
-    ggplot2::annotate("text", x = c(0.76, 2.34), y = -1.22,
-                      label = c(paste0("Discovery\n(n = ", n_a, ")"),
-                                paste0("Validation\n(n = ", n_b, ")")),
-                      size = 3.4, colour = "grey30", lineheight = 0.95) +
-    ggplot2::coord_equal(xlim = c(0, 3.1), ylim = c(-1.6, 1.1), expand = FALSE) +
-    ggplot2::labs(title = "Consensus DEGs across datasets",
-                  subtitle = "central set = significant and direction-concordant in every validation set") +
+    ggplot2::geom_polygon(data = circ(1.6, 0, r_out), ggplot2::aes(x, y),
+                          fill = "#1F6FB4", alpha = 0.12,
+                          colour = "#1F6FB4", linewidth = 0.4) +
+    ggplot2::geom_polygon(data = circ(1.6, 0, r_in), ggplot2::aes(x, y),
+                          fill = "#C0392B", alpha = 0.22,
+                          colour = "#C0392B", linewidth = 0.4) +
+    ggplot2::annotate("text", x = 1.6, y = 0, label = n_b, size = 5.6, colour = "grey10") +
+    ggplot2::annotate("text", x = 1.6, y = r_out + 0.10,
+                      label = paste0("Discovery DEGs (n = ", n_a, ")"),
+                      size = 3.1, colour = "grey30") +
+    ggplot2::annotate("text", x = 1.6, y = -r_out - 0.10,
+                      label = paste0("Replicated in >=1 cohort (n = ", n_b, ")"),
+                      size = 3.1, colour = "grey30") +
+    ggplot2::coord_equal(xlim = c(0.55, 2.65), ylim = c(-1.30, 1.30), expand = FALSE) +
+    ggplot2::labs(title = "Replication of discovery DEGs",
+                  subtitle = paste("inner set: nominal p < 0.05 with concordant",
+                                   "direction, measured in every cohort")) +
     ggplot2::theme_void(base_size = 11) +
     ggplot2::theme(plot.title = ggplot2::element_text(face = "bold", size = 11),
-                   plot.subtitle = ggplot2::element_text(size = 7.6, colour = "grey40"),
+                   plot.subtitle = ggplot2::element_text(size = 7.4, colour = "grey40"),
                    plot.margin = ggplot2::margin(6, 6, 6, 6))
   save_fig(g_venn, "venn_consensus", cfg, 5.2, 4.4)
 }
