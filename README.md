@@ -61,7 +61,10 @@ glaucoma_R_pipeline/
 ├── 14_cross_species.R           人/猴/鼠跨物种一致性（替代动物模型验证）
 ├── 15_results_ledger.R          结果账本：正文数字全部 token 化、可溯源
 ├── 16_manuscript_assets.R       Table 1–6 成表 + 图 panel 清单（+ 可选拼图）
-├── 17_fill_tokens.R             把账本数字回填进稿件，并查漏/查多余
+├── 17_fill_tokens.R             把账本数字回填进稿件，并查漏/查多余（回填后自动重算字数）
+├── tools/                       装包辅助 + 稿件收尾脚本
+│   ├── fill_wordcount.py        正文字数：HTML 与 docx 分别计数并同步表头，不一致就报警
+│   └── fill_placeholders.py     ORCID / 仓库 URL / DOI：格式校验后同时写进 HTML 与 docx
 ├── data/{raw,annotation,processed}/
 ├── results/{tables,figures,scenic}/
 └── logs/                        每步独立日志

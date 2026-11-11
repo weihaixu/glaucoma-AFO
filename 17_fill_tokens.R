@@ -160,8 +160,30 @@ log_msg("已写出：", out_html)
 # 一旦给 fileEncoding 就会多转一层，写出 <U+9700> 这种转义；
 # 不加反而字节直通（15 写的 missing_steps.tsv 就是这么来的），所以这里刻意不写 fileEncoding。
 rep_f <- res_path(cfg, "submission", "token_fill_report.tsv")
+# 首次在干净目录里跑到这一步时 results/submission/ 还不存在，write.table 会直接
+# 报 "cannot open the connection" 并 halt —— 而此时 HTML 已经写出去了，
+# 看起来像"回填成功但报告没生成"，实际是整个脚本失败。先建目录。
+dir.create(dirname(rep_f), recursive = TRUE, showWarnings = FALSE)
 utils::write.table(status, rep_f, sep = "\t", quote = FALSE, row.names = FALSE)
 log_msg("写出表格：", rep_f, " (", nrow(status), " 行)")
+
+# ------------------------------------------------------------- 正文字数 ----
+# 字数必须在 token 全部替换之后才算：一个 {{AUC_TRAIN}} 算一个词，换成
+# "0.87 (0.81–0.92)" 就是三个词。手填的数字跑一次真实数据就作废，所以这里
+# 交给 tools/fill_wordcount.py 重算，并同一条命令里同步 HTML 与 docx。
+# 口径：1. Introduction 到 6. Declarations 之前（不含摘要、声明、参考文献、表格、图注）。
+py <- Sys.which("python")
+wc_script <- proj_path("tools", "fill_wordcount.py")
+if (nzchar(py) && file.exists(wc_script)) {
+  cmd <- sprintf("\"%s\" \"%s\" --html \"%s\"", py, wc_script, out_html)
+  docx_same <- sub("\\.html$", ".docx", out_html)
+  if (file.exists(docx_same)) cmd <- paste0(cmd, sprintf(" --docx \"%s\"", docx_same))
+  log_msg("统计正文字数：", cmd)
+  st_wc <- system(cmd)
+  if (st_wc != 0) log_msg("字数脚本返回非 0（HTML 与 docx 字数不一致或含旧值），请查看上方输出")
+} else {
+  log_msg("跳过字数回填：缺 python 或 tools/fill_wordcount.py")
+}
 
 # --------------------------------------------------------------- 转 docx ----
 if (make_docx) {
