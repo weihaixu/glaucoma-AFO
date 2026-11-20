@@ -209,7 +209,7 @@ drylab:
 
   # 12：两阶段 MR / 中介分析（表达 → IOP → POAG）
   mediation:
-    iop_gwas: "data/raw/iop_gwas.tsv.gz"   # UKB / FinnGen / 已发表 IOP GWAS
+    iop_gwas: "data/raw/iop_gwas_full.tsv.gz"   # GCST009413 Bonnemaijer 2021 IOP GWAS（完整版）
     p_threshold: 5e-8
     # GCST009413（Bonnemaijer 2021，IGGC 31,269 EUR）的实际列名；
     # MAF 列与效应等位基因未对齐，回文 SNP 宁可让 harmonise 当未知剔除（eaf 不映射）
@@ -223,15 +223,21 @@ drylab:
 
   # 14：跨物种保守性（人 / 猴 / 鼠）
   cross_species:
-    objects: {}                    # 例：{macaque: "data/processed/scRNA_macaque.rds",
-                                   #      mouse: "data/processed/scRNA_mouse.rds"}
-    celltypes: {}                  # 例：{macaque: ["TM","JCT"], mouse: ["TM"]}
+    objects: {macaque: "data/processed/scRNA_macaque.rds"}   # 例：{macaque: "...", mouse: "..."}
+    celltypes: {macaque: ["TM", "JCT", "Fibro", "Endo", "Immune"]}
     celltypes_default: ["TM", "JCT"]
     condition_col: "condition"     # 分组列；不存在时按 group_regex 在前几列 meta 中推断
     group_regex: "POAG|glaucoma|DEX|treated|chronic|disease"
     include_self: false            # true 时把人的 scrna.rds 也当一组跑（阳性对照）
     ortholog_table: null           # 两列 tsv：human_symbol / <species>_symbol；不给则 toupper 近似
     min_cells: 20                  # 每个 细胞类型×分组 的最少细胞数
+    # 人源基因集（跨物种比较的参照）：默认共识基因仅 5 个，统计功效不足；
+    # 改用训练集的显著 DEG（FDR<0.05 且 |logFC|>1，约 186 个）
+    human_deg_file: "results/tables/deg_GSE27276.tsv"
+    human_deg_logfc: "logFC"
+    human_deg_fdr: "adj.P.Val"
+    human_deg_fdr_thr: 0.05
+    human_deg_lfc_thr: 1.0
 
   # 13：稳健性、证伪与药物连通性
   robustness:

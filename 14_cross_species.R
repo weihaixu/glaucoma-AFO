@@ -45,8 +45,17 @@ if (!requireNamespace("Seurat", quietly = TRUE)) stop("需要 Seurat 包", call.
 # ---------------------------------------------------------------- 工具函数 ----
 
 get_mat <- function(o, what = "data") {
-  tryCatch(Seurat::GetAssayData(o, assay = "RNA", layer = what),
-           error = function(e) Seurat::GetAssayData(o, assay = "RNA", slot = what))
+  a <- Seurat::GetAssay(o, assay = "RNA")
+  layers <- tryCatch(SeuratObject::Layers(a), error = function(e) character(0))
+  if (what %in% layers) {
+    Seurat::GetAssayData(o, assay = "RNA", layer = what)
+  } else if ("data" %in% layers) {
+    Seurat::GetAssayData(o, assay = "RNA", layer = "data")
+  } else if ("counts" %in% layers) {
+    Seurat::GetAssayData(o, assay = "RNA", layer = "counts")
+  } else {
+    stop("RNA assay 没有可用的 data/counts layer: ", paste(layers, collapse = ","))
+  }
 }
 
 # 分组列：优先用户指定列；否则在前几列 meta 里按 group_regex 推断
@@ -127,16 +136,31 @@ pseudobulk <- function(obj, cond, celltypes, min_cells) {
   out
 }
 
-# ---------------------------------------------------------------- 1) 人共识 ----
-sig_file <- res_path(cfg, "tables", "deg_consensus.tsv")
-require_file(sig_file, "先跑 02_deg_limma.R 得到 deg_consensus.tsv")
+# ---------------------------------------------------------------- 1) 人疾病基因集 ----
+# 默认用跨数据集共识基因（deg_consensus.tsv）；若显著基因太少（< 50），
+# 可配置 human_deg_file 指向训练集的完整 DEG 表并给出 FDR/logFC 阈值。
+sig_file <- proj_path(xs$human_deg_file %||% "results/tables/deg_consensus.tsv")
+require_file(sig_file, "先跑 02_deg_limma.R 得到人疾病基因表")
 sig <- utils::read.delim(sig_file, stringsAsFactors = FALSE)
-lf_col <- grep("^logFC", names(sig), value = TRUE)[1]
-if (is.na(lf_col)) stop("共识基因表里找不到 logFC 列", call. = FALSE)
+lf_col <- xs$human_deg_logfc %||% grep("^logFC", names(sig), value = TRUE)[1]
+if (is.na(lf_col) || !lf_col %in% names(sig))
+  stop("人基因表里找不到 logFC 列 '", lf_col, "'", call. = FALSE)
+keep <- rep(TRUE, nrow(sig))
+fdr_col <- xs$human_deg_fdr
+if (!is.null(fdr_col) && fdr_col %in% names(sig)) {
+  thr <- xs$human_deg_fdr_thr %||% 0.05
+  keep <- keep & as.numeric(sig[[fdr_col]]) < thr
+}
+lfc_thr <- xs$human_deg_lfc_thr
+if (!is.null(lfc_thr)) keep <- keep & abs(as.numeric(sig[[lf_col]])) > lfc_thr
+sig <- sig[keep, , drop = FALSE]
 human_lfc <- stats::setNames(as.numeric(sig[[lf_col]]), sig$gene)
 human_lfc <- human_lfc[is.finite(human_lfc) & human_lfc != 0]
-log_msg("人共识基因：", length(human_lfc), " 个（上调 ", sum(human_lfc > 0),
-        "，下调 ", sum(human_lfc < 0), "）")
+human_lfc <- human_lfc[!duplicated(names(human_lfc))]
+log_msg("人疾病基因集（", basename(sig_file), "）：", length(human_lfc),
+        " 个（上调 ", sum(human_lfc > 0), "，下调 ", sum(human_lfc < 0), "）")
+if (length(human_lfc) < 50)
+  log_msg("警告：人基因集只有 ", length(human_lfc), " 个，少于 50；跨方向检验统计功效有限，结论需谨慎")
 
 min_cells <- xs$min_cells %||% 20
 cond_col  <- xs$condition_col %||% "condition"
@@ -267,7 +291,14 @@ for (sp in names(xs$objects)) {
                                               seed = 1, nbin = 12),
                        error = function(e) NULL)
       if (is.null(obj2)) next
-      sc <- obj2$xs1
+      # AddModuleScore(name="xsm") 生成列名 xsm1（数字后缀）
+      score_nm <- if (set_name == "down") "xsm2" else "xsm1"
+      if (!score_nm %in% names(obj2@meta.data)) {
+        cand <- grep("^xsm", names(obj2@meta.data), value = TRUE)
+        if (!length(cand)) next
+        score_nm <- cand[length(cand)]
+      }
+      sc <- obj2@meta.data[[score_nm]]
       for (ct in cts) {
         i1 <- which(obj2$cell_type == ct & obj2$condition == "control")
         i2 <- which(obj2$cell_type == ct & obj2$condition == "case")

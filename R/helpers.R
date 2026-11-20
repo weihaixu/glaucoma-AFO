@@ -97,7 +97,10 @@ LOG_FILE <- NULL
 log_init <- function(script_name, cfg = NULL) {
   dir <- if (!is.null(cfg)) proj_path(cfg_get(cfg, "project.log_dir", "logs")) else proj_path("logs")
   if (!dir.exists(dir)) dir.create(dir, recursive = TRUE, showWarnings = FALSE)
-  LOG_FILE <<- file.path(dir, paste0(script_name, ".log"))
+  # 每次运行用带时间戳的新文件：安全策略禁止进程打开已有文件做写/追加，
+  # 复用同名 .log 会导致 Permission denied 甚至进程被杀
+  LOG_FILE <<- file.path(dir, paste0(script_name, "_",
+                                     format(Sys.time(), "%Y%m%d_%H%M%S"), ".log"))
   log_msg("===== ", script_name, " 开始 @ ", format(Sys.time()), " =====")
 }
 
@@ -105,7 +108,12 @@ log_msg <- function(...) {
   txt <- paste0(...)
   line <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", txt)
   message(line)
-  if (!is.null(LOG_FILE)) cat(line, "\n", file = LOG_FILE, append = TRUE, sep = "")
+  # 本机安全策略下同一文件的第二次写/追加会 Permission denied：
+  # 写失败时静默降级为仅控制台输出，不让整条管道因日志中断。
+  if (!is.null(LOG_FILE)) {
+    tryCatch(cat(line, "\n", file = LOG_FILE, append = TRUE, sep = ""),
+             error = function(e) NULL)
+  }
   invisible(NULL)
 }
 

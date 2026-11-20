@@ -95,10 +95,10 @@ for (v in valid_cfg) {
   if (is.null(pv) || !"group" %in% names(pv)) next
   nc <- sum(pv$group == "case"); nk <- sum(pv$group == "control")
   n_valid_total <- n_valid_total + nrow(pv)
-  valid_txt <- c(valid_txt, paste0(gse, "（", nc, " 例 POAG / ", nk, " 例对照，n = ", nrow(pv), "）"))
+  valid_txt <- c(valid_txt, paste0(gse, " (", nc, " POAG / ", nk, " controls, n = ", nrow(pv), ")"))
 }
 if (length(valid_txt)) {
-  TK("VALID_DESC", paste(valid_txt, collapse = "、"), paste(valid_txt, collapse = ";"),
+  TK("VALID_DESC", paste(valid_txt, collapse = "; "), paste(valid_txt, collapse = ";"),
      "data/processed/*_pheno.rds", "", "验证集描述，直接写进方法与结果")
   TK("N_VALID_TOTAL", n_valid_total, n_valid_total, "data/processed/*_pheno.rds", "", "")
 }
@@ -138,7 +138,7 @@ if (!is.null(cons)) {
   key_genes <- c("LOX", "LOXL1", "TGFB2", "COL1A1", "COL1A2", "MMP2", "MMP9", "TIMP1",
                  "YAP1", "WWTR1", "FN1", "SPP1", "MYOC")
   hit <- intersect(toupper(gene_c), key_genes)
-  TK("KEY_GENES_HIT", if (length(hit)) paste(hit, collapse = ", ") else "无",
+  TK("KEY_GENES_HIT", if (length(hit)) paste(hit, collapse = ", ") else "none",
      paste(hit, collapse = ","), src_of(cons), "", "预设假说相关基因在共识表中的命中情况")
   TK("N_KEY_GENES_HIT", length(hit), length(hit), src_of(cons), "", "")
   # 逐基因 logFC，供讨论里点名时引用
@@ -211,9 +211,9 @@ if (!is.null(sig_tab)) {
     grepl("^\\(?Intercept\\)?$", gn_all, ignore.case = TRUE)
   }
   is_int[is.na(is_int)] <- FALSE
-  gn <- gn_all[!is_int & nzchar(trimws(gn_all))]
+  gn <- gsub("`", "", gn_all[!is_int & nzchar(trimws(gn_all))])
   TK("N_SIGNATURE", length(gn), length(gn), src_of(sig_tab), "", "最终 signature 基因数")
-  TK("SIG_GENES", paste(gn, collapse = "、"), paste(gn, collapse = ","), src_of(sig_tab), "",
+  TK("SIG_GENES", paste(gn, collapse = ", "), paste(gn, collapse = ","), src_of(sig_tab), "",
      "模型里实际进入的基因（不含截距）")
 }
 
@@ -322,7 +322,7 @@ if (!is.null(col)) {
     # 有 15/150 个 ENSG 在 org.Hs.eg.db 里没有 SYMBOL，别把 NA 写进正文
     bad <- is.na(sgn) | !nzchar(sgn)
     if (any(bad)) sgn[bad] <- strong$gene[bad]
-    TK("COLOC_STRONG_LIST", paste(unique(sgn), collapse = "、"),
+    TK("COLOC_STRONG_LIST", paste(unique(sgn), collapse = ", "),
        paste(unique(sgn), collapse = ","), src_of(col), "", "通过阈值的基因清单")
   }
 }
@@ -331,7 +331,7 @@ twas <- tbl("twas_significant")
 if (!is.null(twas)) {
   gn <- pick(twas, c("ID", "gene", "GENE"))
   TK("N_TWAS_SIG", nrow(twas), nrow(twas), src_of(twas), "", "Bonferroni 后显著基因数")
-  if (!is.null(gn)) TK("TWAS_GENES", paste(head(unique(gn), 10), collapse = "、"),
+  if (!is.null(gn)) TK("TWAS_GENES", paste(head(unique(gn), 10), collapse = ", "),
                        paste(unique(gn), collapse = ","), src_of(twas), "")
 }
 twas_all <- tbl("twas_all")
@@ -344,8 +344,10 @@ if (!is.null(twas_all)) {
     both <- intersect(g1, g2)
     TK("N_DOUBLE_SUPPORT", length(both), length(both), "coloc ∩ twas",
        paste(both, collapse = ","), "共定位与 TWAS 双支持的基因数（G4 门禁）")
-    if (length(both)) TK("DOUBLE_GENES", paste(both, collapse = "、"), paste(both, collapse = ","),
+    if (length(both)) TK("DOUBLE_GENES", paste(both, collapse = ", "), paste(both, collapse = ","),
                          "coloc ∩ twas", "")
+    else TK("DOUBLE_GENES", "none", "none", "coloc ∩ twas", "",
+            "本次运行中两组证据没有共同基因；正文括注写 none 而不是留空")
   }
 }
 
@@ -363,9 +365,11 @@ if (!is.null(mr)) {
   TK("MR_TOP_B", fmt(b[j], 3), b[j], src_of(mr), paste(gn[j], meth[j]), "效应量（log OR 或 SD 单位）")
   TK("MR_TOP_P", fmt_p(p[j]), p[j], src_of(mr), paste(gn[j], meth[j]))
   if (!is.null(ns)) TK("MR_TOP_NSNP", ns[j], ns[j], src_of(mr), paste(gn[j], meth[j]))
-  fdr <- pick(mr, c("fdr", "FDR"))
-  if (!is.null(fdr)) TK("MR_TOP_FDR", fmt_p(as.numeric(fdr)[j]), as.numeric(fdr)[j],
-                        src_of(mr), paste(gn[j], meth[j]))
+  # 10_mr.R 的 fdr 列在全是 Wald ratio 时会留空；用同一张表的 pval 现场做 BH，
+  # 保证 MR_TOP_FDR 是可复现的真实数字而不是 NA。
+  fdr <- tryCatch(as.numeric(pick(mr, c("fdr", "FDR"))), error = function(e) NULL)
+  if (is.null(fdr) || !length(fdr) || all(is.na(fdr))) fdr <- stats::p.adjust(p, method = "BH")
+  TK("MR_TOP_FDR", fmt_p(fdr[j]), fdr[j], src_of(mr), paste(gn[j], meth[j]))
   TK("N_MR_SIG", sum(as.numeric(p) < 0.05, na.rm = TRUE), sum(as.numeric(p) < 0.05, na.rm = TRUE),
      src_of(mr), "", "全部方法中 P<0.05 的行数（仅描述用，正式结论看 IVW+FDR）")
 }
@@ -380,16 +384,20 @@ if (!is.null(inst)) {
 med <- tbl("mr_mediation")
 if (!is.null(med)) {
   gn <- pick(med, c("gene")); prop <- as.numeric(pick(med, c("prop_mediated", "prop")))
-  ind <- as.numeric(pick(med, c("indirect", "ind_eff"))); dir <- as.numeric(pick(med, c("direct", "dir_eff")))
+  ind <- as.numeric(pick(med, c("beta_indirect", "indirect", "ind_eff")))
+  dir <- as.numeric(pick(med, c("beta_direct_mvmr", "direct", "dir_eff")))
   pp <- as.numeric(pick(med, c("p_indirect", "p")))
   j <- which.min(pp)
   if (length(j) && is.finite(prop[j])) {
     TK("MED_GENE", gn[j], gn[j], src_of(med), gn[j])
-    TK("MED_PROP", fmt(100 * prop[j], 1), prop[j], src_of(med), gn[j], "中介比例（%）")
+    TK("MED_PROP", paste0(fmt(100 * prop[j], 1), "%"), prop[j], src_of(med), gn[j], "中介比例（%）")
     TK("MED_INDIRECT", fmt(ind[j], 3), ind[j], src_of(med), gn[j])
-    TK("MED_DIRECT", fmt(dir[j], 3), dir[j], src_of(med), gn[j], "调整 IOP 后的直接效应")
+    TK("MED_DIRECT", if (is.finite(dir[j])) fmt(dir[j], 3) else "not estimable (single instrument)",
+       dir[j], src_of(med), gn[j], "调整 IOP 后的直接效应；单工具变量时无法用 MVMR 估计")
     TK("MED_P", fmt_p(pp[j]), pp[j], src_of(med), gn[j])
-    flag <- if (prop[j] > 1 || prop[j] < 0) "方向不一致，正文不得解释为中介" else "可解释为部分中介"
+    flag <- if (prop[j] > 1 || prop[j] < 0) "direction-inconsistent; should not be read as mediation" else "consistent with partial mediation"
+    if (!is.finite(dir[j]))
+      flag <- paste0(flag, "; direct effect not estimable with a single instrument, so an IOP-independent route cannot be asserted")
     TK("MED_INTERP", flag, flag, src_of(med), gn[j], "措辞边界")
   }
 }
@@ -397,18 +405,32 @@ if (!is.null(med)) {
 # ============================================================ 6) 单细胞 ====
 prop <- tbl("sc_celltype_prop")
 if (!is.null(prop)) {
-  ct <- pick(prop, c("cell_type", "celltype"))
-  TK("N_CELLTYPES", length(unique(ct)), length(unique(ct)), src_of(prop), "", "注释到的细胞类型数")
-  TK("CELLTYPE_LIST", paste(unique(ct), collapse = "、"), paste(unique(ct), collapse = ","), src_of(prop), "")
-  nc <- attr(prop, "n_cells")
-  if (!is.null(nc)) TK("N_CELLS", format(nc, big.mark = ","), nc, src_of(prop), "", "单细胞总数")
+  # 06 写出的是宽表（细胞类型作列名、sample 作一列），不是 cell_type 长表；
+  # 两种都要认，否则 N_CELLTYPES 会算成 0。
+  ct <- tryCatch(pick(prop, c("cell_type", "celltype")), error = function(e) NULL)
+  if (is.null(ct) || !length(ct)) ct <- setdiff(names(prop), "sample")
+  ct <- unique(as.character(ct))
+  TK("N_CELLTYPES", length(ct), length(ct), src_of(prop), "", "注释到的细胞类型数")
+  TK("CELLTYPE_LIST", paste(ct, collapse = ", "), paste(ct, collapse = ","), src_of(prop), "")
+}
+# 细胞总数是注释对象的事实，不是比例表能推出来的：
+# tools/write_sc_counts.R 从 scRNA_ref.rds 的 meta.data 生成 sc_celltype_counts.tsv。
+cnt <- tbl("sc_celltype_counts")
+if (!is.null(cnt)) {
+  ct2 <- unique(as.character(pick(cnt, "cell_type")))
+  if (length(ct2)) {
+    TK("N_CELLTYPES", length(ct2), length(ct2), src_of(cnt), "", "注释到的细胞类型数")
+    TK("CELLTYPE_LIST", paste(ct2, collapse = ", "), paste(ct2, collapse = ","), src_of(cnt), "")
+  }
+  ncell <- as.numeric(pick(cnt, "n"))
+  nc <- sum(ncell, na.rm = TRUE)
+  if (nc > 0) TK("N_CELLS", format(nc, big.mark = ","), nc, src_of(cnt), "", "单细胞总数")
 }
 
 pert <- tbl("perturb_summary")
 if (!is.null(pert)) {
   gn <- pick(pert, c("gene")); ct <- pick(pert, c("celltype", "cell_type"))
   sc <- as.numeric(pick(pert, c("score"))); pp <- as.numeric(pick(pert, c("p_perm", "p")))
-  dirn <- pick(pert, c("direction", "call"))
   j <- which.min(pp)
   TK("N_PERT", nrow(pert), nrow(pert), src_of(pert), "", "完成的 基因×细胞类型 扰动组合数")
   TK("PERT_TOP_GENE", gn[j], gn[j], src_of(pert), paste(gn[j], ct[j]))
@@ -416,7 +438,12 @@ if (!is.null(pert)) {
   TK("PERT_TOP_SCORE", fmt(sc[j], 3), sc[j], src_of(pert), paste(gn[j], ct[j]),
      "负值表示敲低该基因可逆转疾病表达程序")
   TK("PERT_TOP_P", fmt_p(pp[j]), pp[j], src_of(pert), paste(gn[j], ct[j]))
-  if (!is.null(dirn)) TK("PERT_TOP_DIR", dirn[j], dirn[j], src_of(pert), paste(gn[j], ct[j]))
+  # 11 的表没有 direction 列；方向的唯一依据就是 score 的符号
+  # （负值 = 敲低后可逆转疾病表达程序），据此生成正文需要的动词。
+  dirn <- tryCatch(pick(pert, c("direction", "dir")), error = function(e) NULL)
+  if (is.null(dirn) || !length(dirn))
+    dirn <- ifelse(sc < 0, "reverse", "reinforce")
+  TK("PERT_TOP_DIR", dirn[j], dirn[j], src_of(pert), paste(gn[j], ct[j]))
   n_sig <- sum(pp < 0.05, na.rm = TRUE)
   TK("N_PERT_SIG", n_sig, n_sig, src_of(pert), "", "置换 P<0.05 的组合数")
 }
@@ -432,7 +459,7 @@ if (!is.null(xs)) {
   TK("XS_MAX_P", fmt_p(bp[j]), bp[j], src_of(xs), paste(sp[j], ct[j]))
   TK("XS_MIN_CONC", paste0(fmt(100 * min(cc, na.rm = TRUE), 1), "%"), min(cc, na.rm = TRUE),
      src_of(xs), "", "最低一组，用于诚实交代异质性")
-  TK("XS_SPECIES", paste(unique(sp), collapse = "、"), paste(unique(sp), collapse = ","), src_of(xs), "")
+  TK("XS_SPECIES", paste(unique(sp), collapse = ", "), paste(unique(sp), collapse = ","), src_of(xs), "")
   ok <- which(cc >= 0.7 & bp < 0.05)
   TK("N_XS_PASS", length(ok), length(ok), src_of(xs), "", "达到保守判据（≥70% 且 P<0.05）的组合数")
 }
@@ -585,7 +612,7 @@ if (!is.null(pert)) {
   TK("N_PERT_GENETIC", n_ov, n_ov, "perturb_summary ∩ (coloc ∪ mr)",
      paste(top5, collapse = ","),
      "排前五的扰动基因中同时有共定位或 MR 支持的个数；注意两者不独立")
-  TK("PERT_TOP5", paste(top5, collapse = "、"), paste(top5, collapse = ","), src_of(pert), "")
+  TK("PERT_TOP5", paste(top5, collapse = ", "), paste(top5, collapse = ","), src_of(pert), "")
 }
 
 # --- MR-Egger 截距：有水平多效性嫌疑的基因数 ---------------------------
@@ -651,8 +678,48 @@ cm <- tbl("cmap_connectivity")
 if (!is.null(cm)) {
   cs2 <- as.numeric(pick(cm, c("cs", "score")))
   n_sig_cm <- if (length(cs2) && any(is.finite(cs2))) sum(cs2 < 0, na.rm = TRUE) else nrow(cm)
-  TK("N_CMAP", nrow(cm), nrow(cm), src_of(cm), "", "药物连通性分析的化合物总数")
-  TK("N_CMAP_NEG", n_sig_cm, n_sig_cm, src_of(cm), "", "连通性得分为负（可能逆转疾病特征）的化合物数")
+  TK("N_CMAP", format(nrow(cm), big.mark = ",", trim = TRUE, scientific = FALSE), nrow(cm), src_of(cm), "", "药物连通性分析的化合物总数")
+  TK("N_CMAP_NEG", format(n_sig_cm, big.mark = ",", trim = TRUE, scientific = FALSE), n_sig_cm, src_of(cm), "", "连通性得分为负（可能逆转疾病特征）的化合物数")
+}
+
+# --- 去卷积组成差异（04 的 deconv_group_diff）--------------------------
+dd <- tbl("deconv_group_diff")
+if (!is.null(dd) && nrow(dd) && "fdr" %in% names(dd)) {
+  fdrv <- as.numeric(dd$fdr)
+  ddv  <- as.numeric(dd$diff)
+  ctv  <- as.character(dd$cell_type)
+  fin  <- is.finite(fdrv) & is.finite(ddv)
+  up <- ctv[fin & ddv > 0 & fdrv < 0.05]
+  dn <- ctv[fin & ddv < 0 & fdrv < 0.05]
+  # 类型代码 -> 正文可读标签（未收录的原样输出）
+  lab <- c("TM_Fibro" = "trabecular-meshwork fibroblasts",
+           "Schlemm_Endo" = "Schlemm canal endothelium",
+           "Macrophage" = "macrophages", "Lymphocyte" = "lymphocytes",
+           "Mast" = "mast cells", "Pericyte" = "pericytes",
+           "Schwann" = "Schwann cells", "Ciliary_Muscle" = "ciliary muscle",
+           "Uveal_Fibro" = "uveal fibroblasts", "Sclera_Fibro" = "scleral fibroblasts",
+           "K_Fibro" = "keratocyte-like fibroblasts", "FibroX" = "fibroblast-like cells",
+           "K_Endo" = "corneal endothelium", "VascEndo" = "vascular endothelium",
+           "Lymphatic_Endo" = "lymphatic endothelium",
+           "CC_VenEndo" = "collector-channel venous endothelium",
+           "Uveal_Melanocyte" = "uveal melanocytes",
+           "Conj_Melanocyte" = "conjunctival melanocytes",
+           "Goblet" = "goblet cells",
+           "Conj_Epi-Superficial" = "superficial conjunctival epithelium",
+           "Conj_Epi-Wing" = "wing conjunctival epithelium",
+           "Conj_Epi-Basal" = "basal conjunctival epithelium",
+           "K_Epi-Superficial" = "superficial corneal epithelium",
+           "K_Epi-Wing" = "wing corneal epithelium",
+           "K_Epi-Basal" = "basal corneal epithelium",
+           "Limbal_Epi-Superficial" = "superficial limbal epithelium",
+           "Limbal_Epi-Wing" = "wing limbal epithelium",
+           "Limbal_Epi-Basal" = "basal limbal epithelium")
+  lab_fn <- function(v) { l <- unname(lab[v]); ifelse(is.na(l), v, l) }
+  fmt_v <- function(v) if (length(v)) paste(lab_fn(v), collapse = ", ") else "none"
+  TK("DECONV_HIGHER", fmt_v(up), paste(up, collapse = ","), src_of(dd), "",
+     "POAG 中估计占比更高的细胞类型（FDR<0.05）")
+  TK("DECONV_LOWER", fmt_v(dn), paste(dn, collapse = ","), src_of(dd), "",
+     "POAG 中估计占比更低的细胞类型（FDR<0.05）")
 }
 
 # --- SCENIC 差异 regulon 数 ------------------------------------------------

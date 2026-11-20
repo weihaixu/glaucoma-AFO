@@ -173,16 +173,26 @@ log_msg("写出表格：", rep_f, " (", nrow(status), " 行)")
 # 交给 tools/fill_wordcount.py 重算，并同一条命令里同步 HTML 与 docx。
 # 口径：1. Introduction 到 6. Declarations 之前（不含摘要、声明、参考文献、表格、图注）。
 py <- Sys.which("python")
+# Windows 上 `python` 常指向 Microsoft Store 的占位 stub（运行会打印安装提示并退出），
+# 必须用 python.exe 实际能否 --version 来判断，否则字数永远回填不上。
+py_ok <- FALSE
+if (nzchar(py)) py_ok <- system2(py, "--version", stdout = FALSE, stderr = FALSE) == 0
 wc_script <- proj_path("tools", "fill_wordcount.py")
-if (nzchar(py) && file.exists(wc_script)) {
+rs_script <- proj_path("tools", "fill_wordcount.R")
+if (py_ok && file.exists(wc_script)) {
   cmd <- sprintf("\"%s\" \"%s\" --html \"%s\"", py, wc_script, out_html)
   docx_same <- sub("\\.html$", ".docx", out_html)
   if (file.exists(docx_same)) cmd <- paste0(cmd, sprintf(" --docx \"%s\"", docx_same))
   log_msg("统计正文字数：", cmd)
   st_wc <- system(cmd)
   if (st_wc != 0) log_msg("字数脚本返回非 0（HTML 与 docx 字数不一致或含旧值），请查看上方输出")
+} else if (file.exists(rs_script)) {
+  # 没有可用 Python 时用 R 复刻同一套 HTML 计数规则（docx 需 python-docx，暂不同步）
+  log_msg("未找到可用 python，改用 R 版字数统计（仅同步 HTML）")
+  st_wc <- system2("Rscript", c(shQuote(rs_script), "--html", shQuote(out_html)))
+  if (st_wc != 0) log_msg("R 字数脚本返回非 0，请查看上方输出")
 } else {
-  log_msg("跳过字数回填：缺 python 或 tools/fill_wordcount.py")
+  log_msg("跳过字数回填：既无可用 python，也无 tools/fill_wordcount.R")
 }
 
 # --------------------------------------------------------------- 转 docx ----

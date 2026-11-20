@@ -22,10 +22,19 @@ load_pkgs(c("ggplot2", "Seurat", "harmony", "CellChat"))
 set.seed(cfg_get(cfg, "project.seed", 1))
 options(future.globals.maxSize = 8 * 1024^3)
 
-# Seurat v5 用 layer=，v4 用 slot=，统一包一层
+# Seurat v5 用 layer=；v4 的 slot= 在新版已 defunct，先探测 layers 再决定
 get_mat <- function(obj, what = "data") {
-  tryCatch(Seurat::GetAssayData(obj, assay = "RNA", layer = what),
-           error = function(e) Seurat::GetAssayData(obj, assay = "RNA", slot = what))
+  a <- Seurat::GetAssay(obj, assay = "RNA")
+  layers <- tryCatch(SeuratObject::Layers(a), error = function(e) character(0))
+  if (what %in% layers) {
+    Seurat::GetAssayData(obj, assay = "RNA", layer = what)
+  } else if ("data" %in% layers) {
+    Seurat::GetAssayData(obj, assay = "RNA", layer = "data")
+  } else if ("counts" %in% layers) {
+    Seurat::GetAssayData(obj, assay = "RNA", layer = "counts")
+  } else {
+    stop("RNA assay 没有可用的 data/counts layer: ", paste(layers, collapse = ","))
+  }
 }
 
 sc_cfg  <- cfg_get(cfg, "scrna", list())
@@ -33,7 +42,35 @@ mode    <- sc_cfg$mode %||% "rds"
 group_regex <- sc_cfg$group_regex %||% "POAG|glaucoma|treated"
 
 # ------------------------------------------------- 1) 读入 -------------------
-if (identical(mode, "rds")) {
+# 断点续跑：scRNA_annotated.rds 含 scale.data 等冗余层，约 4.2GB，读入后
+# 剩余内存不足以为 CellChat 分配连续矩阵。改为从 10x 导出目录重建精简对象
+# （counts + 元数据，带细胞类型/分组），只做 NormalizeData，内存占用小得多。
+exp_dir <- sc_cfg$export_dir %||% "data/raw/scRNA_export"
+resume_f <- proj_path("data", "processed", "scRNA_annotated.rds")
+sc_resumed <- FALSE
+if (!isTRUE(sc_cfg$no_resume) && dir.exists(proj_path(exp_dir)) &&
+    file.exists(proj_path(exp_dir, "matrix.mtx"))) {
+  # 优先用 tools/stream_mtx.R 生成的精简矩阵（52MB，已按细胞类型下采样）
+  small <- proj_path("data", "processed", "scRNA_cellchat_small2.rds")
+  if (file.exists(small) && file.exists(paste0(small, ".meta.csv"))) {
+    m <- readRDS(small)
+    md <- utils::read.csv(paste0(small, ".meta.csv"), row.names = 1,
+                          stringsAsFactors = FALSE)
+    common <- intersect(colnames(m), rownames(md))
+    m <- m[, common, drop = FALSE]; md <- md[common, , drop = FALSE]
+    log_msg("读入精简矩阵 ", nrow(m), " × ", ncol(m), "（流式下采样产物）")
+  } else {
+    stop("缺少 scRNA_cellchat_small.rds：先运行 tools/stream_mtx.R 生成精简表达矩阵")
+  }
+  sc <- Seurat::CreateSeuratObject(counts = m, meta.data = md, project = "scRNA")
+  rm(m)
+  sc <- Seurat::NormalizeData(sc, verbose = FALSE)
+  if (!"cell_type" %in% names(sc@meta.data)) stop("obs.csv 缺 cell_type 列")
+  if (!"condition" %in% names(sc@meta.data)) sc$condition <- "control"
+  sc_resumed <- TRUE
+  log_msg("断点续跑：从 10x 重建精简对象 ", ncol(sc), " 细胞 × ", nrow(sc),
+          " 基因（含 cell_type/condition），跳过完整 rds/QC/聚类")
+} else if (identical(mode, "rds")) {
   f <- proj_path(sc_cfg$rds %||% "data/processed/scRNA_ref.rds")
   require_file(f, "请把单细胞 Seurat 对象放到该路径，或把 scrna.mode 改成 10x")
   sc <- readRDS(f)
@@ -51,6 +88,7 @@ if (identical(mode, "rds")) {
 }
 
 # ------------------------------------------------- 2) QC 与标准化 ------------
+if (!sc_resumed) {
 if (!"percent.mt" %in% names(sc@meta.data)) sc[["percent.mt"]] <- Seurat::PercentageFeatureSet(sc, pattern = "^MT-")
 qc <- sc_cfg$qc %||% list()
 sc <- subset(sc, subset = nFeature_RNA > (qc$min_features %||% 200) &
@@ -115,6 +153,7 @@ prop <- as.data.frame.matrix(table(sc$sample, sc$cell_type))
 prop <- prop / rowSums(prop)
 prop$sample <- rownames(prop)
 write_tsv(prop, "sc_celltype_prop", cfg)
+}   # <- else 分支（非断点续跑）到这里结束
 
 # ------------------------------------------------- 4) TM 区室差异基因 ------
 tm_types <- intersect(sc_cfg$tm_celltypes %||% c("TM", "JCT"), unique(sc$cell_type))
@@ -129,18 +168,34 @@ if (length(tm_types) && length(unique(sc$condition)) > 1) {
 }
 
 # ------------------------------------------------- 5) CellChat -------------
+# 大类 52k 细胞的 data 层 1.6GB，createCellChat/计算通讯概率会需要 >4GB 连续内存，
+# 在 8-16GB 的机器上会失败。按细胞类型分层下采样到每类至多 N 个（保留全部类型），
+# 这是 CellChat 官方对 >10k 细胞数据的建议做法。
 run_cellchat <- function(obj, label) {
-  data.input <- get_mat(obj, "data")
-  meta <- data.frame(labels = obj$cell_type, row.names = colnames(obj))
+  max_per_type <- sc_cfg$cellchat_max_per_type %||% 300L
+  set.seed(1)
+  keep <- unlist(lapply(split(colnames(obj), obj$cell_type), function(x) {
+    if (length(x) > max_per_type) sample(x, max_per_type) else x
+  }), use.names = FALSE)
+  log_msg("CellChat[", label, "] 下采样到 ", length(keep), " 细胞（每类 ≤", max_per_type,
+          "，共 ", length(unique(obj$cell_type)), " 类）")
+  # 必须用 GetAssayData 而不是 a@layers$data：Seurat v5 的 layer 是裸稀疏矩阵，
+  # 不带 dimnames（基因名在 Assay@features、细胞名在 Assay@cells）。
+  # 直接取 layer 会让 CellChatDB 一个基因都匹配不上，data.signaling 变 0 行。
+  dat <- Seurat::GetAssayData(obj, assay = "RNA", layer = "data")
+  stopifnot(length(rownames(dat)) > 0, length(colnames(dat)) > 0)
+  data.input <- dat[, keep, drop = FALSE]
+  lab <- as.character(obj$cell_type)[match(keep, colnames(obj))]
+  meta <- data.frame(labels = lab, row.names = keep)
   cc <- CellChat::createCellChat(object = data.input, meta = meta, group.by = "labels")
   # 某些安装下 CellChatDB.human 惰性加载是空的（subsetData 后 data.signaling 0 行），
   # 必须 data() 显式加载再塞进 @DB
   suppressWarnings(utils::data("CellChatDB.human", package = "CellChat", envir = environment()))
   cc@DB <- CellChatDB.human
   cc <- CellChat::subsetData(cc)
-  # 不装 presto：identifyOverExpressedGenes 默认 do.fast=TRUE 需要 presto 的
-  # 快速 Wilcoxon；标准实现慢一点但结果一致
-  cc <- CellChat::identifyOverExpressedGenes(cc, do.fast = FALSE)
+  # presto（CRAN）提供快速 Wilcoxon；没装的话退回标准实现（52k 细胞约慢 20 倍）
+  cc <- CellChat::identifyOverExpressedGenes(cc,
+         do.fast = requireNamespace("presto", quietly = TRUE))
   cc <- CellChat::identifyOverExpressedInteractions(cc)
   cc <- CellChat::computeCommunProb(cc, raw.use = TRUE, population.size = TRUE)
   cc <- CellChat::filterCommunication(cc, min.cells = 10)
@@ -210,13 +265,36 @@ if (requireNamespace("monocle3", quietly = TRUE) && length(tm_types)) {
 }
 
 # ------------------------------------------------- 7) SCENIC 导出 ----------
-# R 端不跑 pySCENIC（Arboreto 依赖），只导出输入与回读输出，避免版本地狱
-scen_dir <- res_path(cfg, "scenic")
-if (!dir.exists(scen_dir)) dir.create(scen_dir, recursive = TRUE, showWarnings = FALSE)
-utils::write.table(as.matrix(get_mat(sc, "counts")),
-                   file.path(scen_dir, "expr_matrix.tsv"), sep = "\t", quote = FALSE, col.names = NA)
-utils::write.table(data.frame(cell = colnames(sc), cell_type = sc$cell_type),
-                   file.path(scen_dir, "cell_info.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
-log_msg("SCENIC 输入已导出到 ", scen_dir, "，用命令行的 pyscenic 跑完后把 regulons.csv 放回同目录")
+# R 端不跑 pySCENIC（Arboreto 依赖）。15_results_ledger.R 只读
+# results/tables/scenic_regulon_diff.tsv（由 tools/scenic_regulon_count.R 生成），
+# 并不读这里的表达矩阵，因此默认不导出：as.matrix() 一个 59413×8049 的稀疏矩阵
+# 需要 ~2-4GB 连续内存并写出数 GB 的 TSV，是 06 的主要 OOM 来源。
+# 只有确实要在命令行跑 pySCENIC 时，才把 scrna.export_scenic_input 设为 true，
+# 此时按基因分块写出，避免一次性 as.matrix()。
+if (isTRUE(sc_cfg$export_scenic_input)) {
+  scen_dir <- res_path(cfg, "scenic")
+  if (!dir.exists(scen_dir)) dir.create(scen_dir, recursive = TRUE, showWarnings = FALSE)
+  cnt <- get_mat(sc, "counts")
+  keep <- rowSums(cnt > 0) >= max(1, 0.01 * ncol(cnt))
+  cnt <- cnt[keep, , drop = FALSE]
+  log_msg("SCENIC 输入导出：过滤后 ", nrow(cnt), " 基因 × ", ncol(cnt), " 细胞（分块写）")
+  ef <- file.path(scen_dir, "expr_matrix.tsv")
+  con <- file(ef, open = "wt")
+  writeLines(paste("", paste(colnames(cnt), collapse = "\t")), con)
+  chunk <- 2000L
+  for (i in seq_len(ceiling(nrow(cnt) / chunk))) {
+    idx <- ((i - 1) * chunk + 1):min(i * chunk, nrow(cnt))
+    blk <- as.matrix(cnt[idx, , drop = FALSE])
+    write.table(blk, con, sep = "\t", quote = FALSE, col.names = FALSE,
+                row.names = rownames(cnt)[idx])
+  }
+  close(con)
+  utils::write.table(data.frame(cell = colnames(sc), cell_type = sc$cell_type),
+                     file.path(scen_dir, "cell_info.tsv"), sep = "\t",
+                     quote = FALSE, row.names = FALSE)
+  log_msg("SCENIC 输入已导出到 ", scen_dir)
+} else {
+  log_msg("SCENIC 表达矩阵导出已跳过（scrna.export_scenic_input=false）；如需 pySCENIC 输入请设为 true")
+}
 
 log_msg("06 完成")

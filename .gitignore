@@ -20,6 +20,35 @@ tools/probe_*
 tools/pick_mirror_install.R
 tools/install_stage.R
 tools/_cfgtest.R
+tools/check_*
+tools/show_*
+tools/dlr.R
+tools/downloader.R
+tools/resume_dl.R
+tools/segdl.R
+tools/stream_mtx.R
+tools/build_lincs_panel.R
+tools/build_lincs_panel2.R
+tools/build_lincs_panel3.R
+tools/cmap_pipeline_bucket.R
+tools/cmap_pipeline_full.R
+tools/cmap_pipeline_v4.R
+tools/make_deconv_box.R
+tools/make_small2_macaque.R
+tools/rerun_scdeg_tm_full.R
+tools/write_sc_counts.R
+tools/fill_wordcount.R
+tools/draw_med_forest.R
+tools/mr_forest.R
+tools/inspect_mr_all.R
+tools/verify_iop.R
+_check_*
+_debug_*
+_extract_*
+_preview_*
+_edits_raw.txt
+logs_frozen/
+results_frozen/
 
 # ---- vendored third-party sources (re-cloned during environment setup, not redistributed) ----
 tools/ldsc/

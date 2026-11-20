@@ -187,23 +187,38 @@ t6 <- NULL
 if (!is.null(mr)) {
   meth <- as.character(pick(mr, c("method", "Method")))
   keep <- grepl("Inverse variance|IVW", meth, ignore.case = TRUE)
+  # 10_mr.R 在全是单 SNP 工具时只会给出 Wald ratio；此时不要留空表，
+  # 用 Wald ratio 作为主分析并注明工具数 nSNP=1（等价于单 SNP IVW）。
+  if (!any(keep)) keep <- rep(TRUE, nrow(mr))
+  pv <- num(pick(mr, c("pval", "p", "P")))
+  fdr <- suppressWarnings(num(pick(mr, c("fdr", "FDR"))))
+  if (!length(fdr) || all(is.na(fdr))) fdr <- stats::p.adjust(pv, method = "BH")
   t6 <- data.frame(
-    Exposure = pick(mr, c("exposure", "gene", "Gene")),
+    Exposure = pick(mr, c("gene", "Gene", "exposure")),
     Outcome = pick(mr, c("outcome", "Outcome")),
     Method = meth,
     nSNP = num(pick(mr, c("nsnp", "nSNP", "n_snp"))),
     b = round(num(pick(mr, c("b", "beta"))), 3),
     SE = round(num(pick(mr, c("se", "SE"))), 3),
-    P = signif(num(pick(mr, c("pval", "p", "P"))), 3),
+    P = signif(pv, 3),
     OR = round(exp(num(pick(mr, c("b", "beta")))), 3),
-    FDR = signif(num(pick(mr, c("fdr", "FDR"))), 3),
+    FDR = signif(fdr, 3),
     stringsAsFactors = FALSE)[keep, ]
   if (nrow(t6)) t6 <- t6[order(t6$P), ][seq_len(min(30, nrow(t6))), ]
 }
 
 # ------------------------------------------------------- 写 xlsx / tsv ------
+# TableS7：全量 CMap 连通性（正文 Supplementary material 有承诺，缺了会被退回）
+t7 <- read_tbl("cmap_connectivity")
+if (!is.null(t7)) {
+  t7 <- data.frame(drug = as.character(t7$drug),
+                   cs = round(as.numeric(t7$cs), 4),
+                   stringsAsFactors = FALSE)
+  t7 <- t7[order(t7$cs), ]
+}
 tabs <- list("Table1_cohort" = t1, "Table2_topDEG" = t2, "Table3_moduleTrait" = t3,
-             "Table4_model" = t4, "Table5_coloc" = t5, "Table6_MR" = t6)
+             "Table4_model" = t4, "Table5_coloc" = t5, "Table6_MR" = t6,
+             "TableS7_connectivity" = t7)
 
 wb <- openxlsx::createWorkbook()
 hdr <- openxlsx::createStyle(textDecoration = "bold", halign = "center",
@@ -223,8 +238,8 @@ for (nm in names(tabs)) {
   utils::write.table(d, file.path(out_dir, paste0(nm, ".tsv")),
                      sep = "\t", quote = FALSE, row.names = FALSE)
 }
-openxlsx::saveWorkbook(wb, file.path(out_dir, "Tables1-6.xlsx"), overwrite = TRUE)
-log_msg("表已写出：", file.path(out_dir, "Tables1-6.xlsx"))
+openxlsx::saveWorkbook(wb, file.path(out_dir, "Tables1-7.xlsx"), overwrite = TRUE)
+log_msg("表已写出：", file.path(out_dir, "Tables1-7.xlsx"))
 
 # ---------------------------------------------------- figure manifest -------
 # File 列写的是**各自脚本真正 save_fig 出去的文件名**：用 * 通配（<GSE> 这种随数据集变的
@@ -245,23 +260,23 @@ resolve_fig <- function(pat) {
 }
 fig_map <- data.frame(
   Figure = c(rep("Fig1", 3), rep("Fig2", 4), rep("Fig3", 3), rep("Fig4", 4),
-             rep("Fig5", 4), rep("Fig6", 4), rep("Fig7", 3), rep("Fig8", 4),
+             rep("Fig5", 4), rep("Fig6", 3), rep("Fig7", 3), rep("Fig8", 4),
              rep("Fig9", 3)),
   Panel  = c("A", "B", "C",  "A", "B", "C", "D",  "A", "B", "C",  "A", "B", "C", "D",
-             "A", "B", "C", "D",  "A", "B", "C", "D",  "A", "B", "C",
+             "A", "B", "C", "D",  "A", "B", "C",  "A", "B", "C",
              "A", "B", "C", "D",  "A", "B", "C"),
   Content = c(
     "Study design flow", "Data sources and sample sizes", "Analysis modules and decision rules",
     "PCA before/after ComBat", "Volcano (discovery)", "Top-50 heatmap", "Consensus gene overlap",
-    "Soft-threshold fit", "Module dendrogram", "Module-trait heatmap (IOP highlighted)",
+    "Soft-threshold fit", "Module dendrogram", "Module-trait heatmap (disease status highlighted)",
     "GO/KEGG dotplot", "GSVA Hallmark heatmap", "PROGENy pathway activity", "Cell-fraction boxplot",
     "LASSO CV curve", "SVM-RFE accuracy curve", "ROC (train + external)", "Calibration + DCA",
-    "UMAP by cell type", "Marker dotplot", "CellChat differential interactions", "Pseudotime (TM/JCT)",
+    "UMAP by cell type", "CellChat differential interactions", "Pseudotime (TM/JCT)",
     "Cross-species concordance", "Human vs species logFC scatter", "Module score by condition",
     "Coloc PP4 by gene-tissue", "TWAS Manhattan", "MR forest (IVW)", "Mediation decomposition",
     "In silico perturbation score", "Permutation null distribution", "Multiverse AUC range"),
   Script = c(rep("hand-drawn", 3), rep("01", 4), rep("03", 3), rep("04", 4),
-             rep("05", 4), rep("06", 4), rep("14", 3), rep("08/09/10/12", 4),
+             rep("05", 4), rep("06", 3), rep("14", 3), rep("08/09/10/12", 4),
              rep("11/13", 3)),
   File = c(
     "-", "-", "-",
@@ -269,7 +284,7 @@ fig_map <- data.frame(
     "wgcna_softthreshold_*", "wgcna_dendro_*", "wgcna_module_trait_*.png",
     "enrich_dotplot_*.png", "gsva_pathway_bar.png", "progeny_pathway.png", "deconv_box.png",
     "lasso_cv.png", "svmrfe_curve.png", "roc_train.png|roc_valid_*.png", "calibration.png",
-    "sc_umap_celltype.png", "sc_dotplot_marker.png", "cellchat_compare*", "sc_pseudotime_TM.png",
+    "sc_umap_celltype.png", "cellchat_compare*", "sc_pseudotime_TM.png",
     "xspecies_concordance_heatmap.png", "xspecies_logfc_scatter.png", "xspecies_modulescore.png",
     "coloc_locus_*.png", "twas_manhattan.png", "mr_forest.png", "mr_mediation_forest.png",
     "perturb_*.png", "robustness_null_auc.png", "robustness_multiverse.png"),
